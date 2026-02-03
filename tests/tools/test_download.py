@@ -1,3 +1,4 @@
+import platform
 import tempfile
 from pathlib import Path
 
@@ -60,8 +61,9 @@ class TestDownloadHappyPath(TestCase):
             )
 
             assert result.executable is True
-            mode = Path(dest).stat().st_mode
-            assert mode & 0o100  # User execute bit
+            if platform.system() != "Windows":
+                mode = Path(dest).stat().st_mode
+                assert mode & 0o100  # User execute bit
 
     @pytest.mark.asyncio
     async def test_download_creates_parent_dirs(self) -> None:

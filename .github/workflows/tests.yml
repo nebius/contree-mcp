@@ -8,6 +8,7 @@ on:
 
 env:
   DEFAULT_PYTHON: "3.12"
+  FORCE_COLOR: "1"
 
 jobs:
   lint:
@@ -98,5 +99,5 @@ jobs:
         run: uv sync --group dev
 
       - name: Run tests
-        run: uv run pytest -v --tb=short -x
+        run: uv run pytest -v --tb=short
         continue-on-error: ${{ matrix.allow-failure || false }}

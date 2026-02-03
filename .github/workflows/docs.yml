@@ -17,6 +17,7 @@ on:
 
 env:
   DEFAULT_PYTHON: "3.12"
+  FORCE_COLOR: "1"
 
 jobs:
   build:

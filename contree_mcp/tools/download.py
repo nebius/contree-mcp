@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import os
+import platform
 from collections.abc import AsyncIterable
 from pathlib import Path
 from queue import Queue
@@ -115,7 +116,7 @@ async def download(
     async with client.stream_file(image_uuid, path) as chunks:
         file_size = await async_file_writer(dest_path, chunks)
 
-    if executable:
+    if executable and platform.system() != "Windows":
         dest_path.chmod(0o755)
 
     return DownloadOutput(
