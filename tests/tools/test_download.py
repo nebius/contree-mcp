@@ -43,7 +43,7 @@ class TestDownloadHappyPath(TestCase):
             assert result.success is True
             assert result.source.image == "00000000-0000-0000-0000-000000000001"
             assert result.source.path == "/app/source.txt"
-            assert result.destination == dest
+            assert Path(result.destination) == Path(dest)
             assert result.executable is False
             assert Path(dest).exists()
 
