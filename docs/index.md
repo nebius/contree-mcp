@@ -80,6 +80,10 @@ Visit `http://localhost:9452/` for setup guides, tool reference, and best practi
 The HTTP interface with Setup, Instructions, Tools, Resources, and Guides.
 ```
 
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
+
 ```{toctree}
 :hidden:
 :maxdepth: 2
