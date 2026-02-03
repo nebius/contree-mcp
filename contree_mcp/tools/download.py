@@ -25,7 +25,7 @@ class DownloadOutput(BaseModel):
 
 
 async def async_file_writer(destination: Path, stream: AsyncIterable[bytes]) -> int:
-    queue: Queue[bytes | None] = Queue(maxsize=16)
+    queue: Queue[bytes | BaseException | None] = Queue(maxsize=16)
     write_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -33,14 +33,21 @@ async def async_file_writer(destination: Path, stream: AsyncIterable[bytes]) -> 
         total_bytes = 0
         with dest.open("wb") as f:
             while True:
-                chunk = queue.get()
-                loop.call_soon_threadsafe(write_event.set)
-                if chunk is None:
-                    return total_bytes
-
-                f.write(chunk)
-                queue.task_done()
-                total_bytes += len(chunk)
+                match queue.get():
+                    case None:
+                        loop.call_soon_threadsafe(write_event.set)
+                        return total_bytes
+                    case BaseException():
+                        # Error occurred, close file and remove temp
+                        loop.call_soon_threadsafe(write_event.set)
+                        f.close()
+                        dest.unlink(missing_ok=True)
+                        return -1
+                    case bytes() as chunk:
+                        loop.call_soon_threadsafe(write_event.set)
+                        f.write(chunk)
+                        queue.task_done()
+                        total_bytes += len(chunk)
 
     async def queue_waiter() -> None:
         while queue.full():
@@ -51,22 +58,25 @@ async def async_file_writer(destination: Path, stream: AsyncIterable[bytes]) -> 
 
     tmp_path = Path(mktemp(dir=destination.parent, prefix=".download-", suffix=".tmp"))
     task = asyncio.create_task(asyncio.to_thread(sync_writer, tmp_path))
+    error: BaseException | None = None
 
     try:
         async for chunk in stream:
             await queue_waiter()
             queue.put_nowait(chunk)
-    except:
-        tmp_path.unlink(missing_ok=True)
-        raise
+    except BaseException as e:
+        error = e
     finally:
-        # Have to wait for queue to be drained before sending None
+        # Have to wait for queue to be drained before sending signal
         await queue_waiter()
-        queue.put_nowait(None)  # Signal end of stream
+        queue.put_nowait(error)  # None for success, exception for error
 
-    written = await task
+    await task
+    if error is not None:
+        raise error
+
     await asyncio.to_thread(os.replace, tmp_path, destination)
-    return written
+    return task.result()
 
 
 async def download(
