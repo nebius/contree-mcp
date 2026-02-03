@@ -411,4 +411,9 @@ act -j lint && act -j typecheck && act -j test --matrix os:ubuntu-latest
 act -n
 ```
 
-**Note:** act uses Docker containers that simulate Linux runners. macOS/Windows matrix jobs will run in Linux containers, so use `--matrix os:ubuntu-latest` for accurate local testing.
+**Note:** act uses Docker containers that simulate Linux runners. macOS/Windows matrix jobs will run in Linux
+containers, so use `--matrix os:ubuntu-latest` for accurate local testing.
+
+# Copyright
+
+Nebius B.V. 2026, Licensed under the Apache License, Version 2.0 (see "LICENSE" file).
