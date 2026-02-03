@@ -1,5 +1,9 @@
 # Overview
 
+[![PyPI](https://img.shields.io/pypi/v/contree-mcp.svg)](https://pypi.org/project/contree-mcp/)
+[![Tests](https://github.com/nebius/contree-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/nebius/contree-mcp/actions/workflows/tests.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://github.com/nebius/contree-mcp/blob/master/LICENSE)
+
 **Isolated cloud container execution for AI agents.**
 
 Contree MCP is a Model Context Protocol server that gives AI agents secure sandboxed environments with full root access, network, and persistent images. Experiment fearlessly—every container is isolated, every image is immutable, mistakes are free.

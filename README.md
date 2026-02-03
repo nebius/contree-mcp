@@ -1,5 +1,9 @@
 # Contree MCP Server
 
+[![PyPI](https://img.shields.io/pypi/v/contree-mcp.svg)](https://pypi.org/project/contree-mcp/)
+[![Tests](https://github.com/nebius/contree-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/nebius/contree-mcp/actions/workflows/tests.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+
 Run code in isolated cloud containers. Contree gives AI agents secure sandboxed execution environments with full root access, network, and persistent images.
 
 ## Why Contree?
