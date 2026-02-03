@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security Vulnerability
+    url: https://github.com/nebius/contree-mcp/security/advisories/new
+    about: Report security vulnerabilities privately through GitHub Security Advisories
+  - name: Documentation
+    url: https://nebius.github.io/contree-mcp/
+    about: Read the full documentation before opening an issue
+  - name: Nebius Support
+    url: https://nebius.ai/docs/support
+    about: For Nebius platform issues unrelated to Contree MCP
