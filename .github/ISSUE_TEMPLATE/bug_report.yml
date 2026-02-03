@@ -12,7 +12,7 @@ body:
     id: description
     attributes:
       label: Bug Description
-      description: A clear and concise description of what the bug is.
+      description: A clear and concise description of what the bug is, including what you expected to happen.
       placeholder: Describe the bug...
     validations:
       required: true
@@ -30,124 +30,19 @@ body:
       required: true
 
   - type: textarea
-    id: expected
+    id: environment
     attributes:
-      label: Expected Behavior
-      description: What you expected to happen.
-    validations:
-      required: true
-
-  - type: textarea
-    id: actual
-    attributes:
-      label: Actual Behavior
-      description: What actually happened.
-    validations:
-      required: true
-
-  - type: dropdown
-    id: component
-    attributes:
-      label: Component
-      description: Which part of Contree MCP is affected?
-      options:
-        - Container Execution (run tool)
-        - File Operations (rsync, upload, download)
-        - Image Management (list_images, import_image)
-        - Operations (list_operations, wait_operations)
-        - Registry Authentication
-        - MCP Server (stdio/http mode)
-        - Documentation
-        - Other
-    validations:
-      required: true
-
-  - type: markdown
-    attributes:
-      value: |
-        ## Environment Details
-
-  - type: input
-    id: version
-    attributes:
-      label: Contree MCP Version
-      description: Output of `contree-mcp --version` or pip show
-      placeholder: "0.1.0"
-    validations:
-      required: true
-
-  - type: input
-    id: python-version
-    attributes:
-      label: Python Version
-      description: Output of `python --version`
-      placeholder: "3.11.0"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: server-environment
-    attributes:
-      label: MCP Server Environment
-      description: Where is contree-mcp server running?
-      options:
-        - macOS (native)
-        - Linux (native)
-        - Windows (native)
-        - WSL on Windows
-        - Docker container
-        - Remote server (SSH)
-        - Other
-    validations:
-      required: true
-
-  - type: dropdown
-    id: server-os
-    attributes:
-      label: Server OS
-      description: Operating system where contree-mcp runs
-      options:
-        - macOS
-        - Windows
-        - Ubuntu/Debian
-        - RHEL/CentOS/Fedora
-        - Arch Linux
-        - Alpine
-        - Other Linux
-    validations:
-      required: true
-
-  - type: input
-    id: os-version
-    attributes:
-      label: Server OS Version
-      description: e.g., macOS 14.0, Ubuntu 22.04
-      placeholder: "Ubuntu 22.04"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: architecture
-    attributes:
-      label: Server CPU Architecture
-      options:
-        - x86_64 (Intel/AMD)
-        - arm64 (Apple Silicon / ARM)
-        - Other
-    validations:
-      required: true
-
-  - type: dropdown
-    id: install-method
-    attributes:
-      label: Installation Method
-      description: How did you install Contree MCP?
-      options:
-        - pip install
-        - uv pip install
-        - pipx
-        - From source (git clone)
-        - Other
+      label: Environment
+      description: |
+        Please provide the output of these commands:
+        - `contree-mcp --version`
+        - `python --version`
+        - Your OS and version
+      placeholder: |
+        contree-mcp version: 0.1.0
+        Python version: 3.11.0
+        OS: macOS 14.0 / Ubuntu 22.04 / Windows 11
+      render: shell
     validations:
       required: true
 
@@ -161,29 +56,14 @@ body:
         - Claude Code
         - Cursor
         - Windsurf
-        - OpenHands
         - VS Code + MCP extension
-        - Custom Client
         - Other
     validations:
       required: true
 
-  - type: input
-    id: mcp-client-version
-    attributes:
-      label: MCP Client Version
-      description: Version of your MCP client (if known)
-      placeholder: "1.0.0"
-
   - type: textarea
     id: logs
     attributes:
-      label: Relevant Logs
-      description: Please copy and paste any relevant log output.
+      label: Logs
+      description: Please copy and paste any relevant error output or logs.
       render: shell
-
-  - type: textarea
-    id: context
-    attributes:
-      label: Additional Context
-      description: Add any other context about the problem here.
