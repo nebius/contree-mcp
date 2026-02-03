@@ -1,0 +1,274 @@
+# Contree MCP - AI Agent Context
+
+## Identity
+
+Contree MCP is a Model Context Protocol server providing isolated cloud container execution for AI agents. It enables safe sandbox environments where agents can experiment fearlessly with full root access, network, and persistent images.
+
+**Core value:** Fearless experimentation without consequences. Destructive commands (rm -rf /, dd, kernel exploits) are SAFE - nothing escapes the sandbox.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     MCP Client (Claude)                     │
+└────────────────────┬────────────────────────────────────────┘
+                     │ Tool/Resource Calls
+                     ▼
+        ┌────────────────────────────────┐
+        │   FastMCP App (app.py)         │
+        │ - mcp.add_tool(function)       │
+        │ - @mcp.resource() decorator    │
+        │ - mcp.add_prompt()             │
+        └────────────┬───────────────────┘
+                     │
+        ┌────────────▼────────────────┐
+        │  Uvicorn/STDIO Transport    │
+        │  (server.py)                │
+        └────────────┬────────────────┘
+                     │
+┌────────────────────▼────────────────────────────────────────┐
+│              Tool/Resource Functions                        │
+│  (tools/*.py, resources/*.py)                              │
+│  • Get CLIENT from context                                 │
+│  • Call ContreeClient methods                              │
+└────────────────────┬────────────────────────────────────────┘
+                     │
+        ┌────────────▼────────────────┐
+        │    ContreeClient            │    ┌────────────┐
+        │ • HTTP requests to backend  │    │    Auth    │
+        │ • Caching responses         │◄───│  auth/*    │
+        │ • Operation polling         │    │RegistryAuth│
+        └────────────┬────────────────┘    └────────────┘
+                     │
+        ┌────────────▼────────────────┐
+        │ Contree Backend API         │
+        │ (contree.dev)               │
+        └─────────────────────────────┘
+
+Parallel Services:
+├─ Cache (SQLite) - General purpose caching (credentials, images)
+├─ FileCache (SQLite) - File state tracking for rsync
+└─ ContextMiddleware - Request context preservation (HTTP mode)
+```
+
+---
+
+## Key Design Decisions
+
+### 1. Image UUIDs are Immutable
+- Same UUID always means same filesystem state
+- Use UUIDs directly instead of tags when possible
+- Tags are just pointers to UUIDs
+
+### 2. Filesystem Change Detection
+- When `disposable=false`, `result_image != input_image` means changes occurred
+- Enables trie-like branching for parallel experiments
+
+### 3. File Sync with Smart Caching
+- `rsync` uses three-tier resolution: local cache → server dedup → upload
+- Returns `directory_state_id` for injection into containers
+
+### 4. Resource URI Routing (ContextVar Pattern)
+- `ResourceBox` routes URIs to `ResourceEntry` handlers
+- URI parameters are extracted via regex and passed as kwargs to `read()`
+- Current URI is available via `self.uri` property (ContextVar)
+- Helper methods: `self.text()`, `self.json()`, `self.blob()` auto-set URI
+
+---
+
+## Tool Quick Reference
+
+| Tool | Description |
+|------|-------------|
+| `run` | Execute command in microVM (main execution tool) |
+| `rsync` | Sync local files with smart caching |
+| `list_images` | List available images |
+| `get_image` | Get image by UUID or tag |
+| `import_image` | Import OCI image from registry (requires auth) |
+| `registry_token_obtain` | Open browser to create PAT for registry |
+| `registry_auth` | Validate and store registry credentials |
+| `set_tag` | Set or remove image tag |
+| `upload` | Upload single file |
+| `download` | Download file to local |
+| `list_files` | List files in container image (no VM) |
+| `read_file` | Read file from container image (no VM) |
+| `list_operations` | List operations |
+| `get_operation` | Get operation status |
+| `wait_operations` | Wait for multiple operations |
+| `cancel_operation` | Cancel running operation |
+| `get_guide` | Get agent guide sections |
+
+> Tool details are in tool descriptions. Use `contree://guide/reference` for patterns.
+
+---
+
+## Resource Quick Reference
+
+| Resource | URI Template | Description |
+|----------|--------------|-------------|
+| `read_file` | `contree://image/{image}/read/{path}` | Read file from image |
+| `image_ls` | `contree://image/{image}/ls/{path}` | List directory |
+| `image_lineage` | `contree://image/{image}/lineage` | Parent-child relationships |
+| `instance_operation` | `contree://operations/instance/{operation_id}` | Instance operation details |
+| `import_operation` | `contree://operations/import/{operation_id}` | Import operation details |
+| `guide` | `contree://guide/{section}` | Agent guides (static) |
+
+**URI Notes:**
+- `{image}`: UUID or `tag:name` (e.g., `tag:alpine:latest`)
+- `{path}`: Path without leading slash (e.g., `etc/passwd`, `.` for root)
+
+---
+
+## Class Hierarchy (Essentials)
+
+### Tool System
+```
+FastMCP.add_tool(func) - Registers async functions as tools
+    │
+    └── async def tool_name(params) -> Response
+            • Get CLIENT from context
+            • Call ContreeClient methods
+            • Return Pydantic model or dict
+```
+
+### Resource System
+```
+FastMCP @mcp.resource() decorator
+    │
+    ├── PathResourceTemplate - Custom template for paths with slashes
+    │       └── read_file, image_ls (allow {path} like "etc/passwd")
+    │
+    ├── Standard ResourceTemplate
+    │       └── image_lineage, instance_operation, import_operation
+    │
+    └── StaticResource - Static content for guide sections
+            └── Guide sections (workflow, reference, async, etc.)
+```
+
+### Auth System
+```
+RegistryAuth (auth/registry.py) - OCI registry authentication
+    ├── from_url() - Parse registry from image URL
+    ├── validate_token() - Verify credentials via /v2/ API
+    ├── discover_endpoint() - Find auth realm from registry
+    └── get_bearer_token() - Exchange PAT for scoped token
+
+RegistryToken (Pydantic model) - Stored credentials
+    └── registry, username, token, scopes, created_at
+```
+
+---
+
+## MANDATORY WORKFLOW
+
+Every task MUST follow: CHECK → PREPARE → EXECUTE
+
+### Step 1: CHECK for Prepared Environment
+```json
+// list_images
+{"tag_prefix": "common/"}
+```
+
+### Step 2: PREPARE (if not found)
+```json
+// import_image, run (disposable=false), set_tag
+{"image_uuid": "<result>", "tag": "common/python-ml/python:3.11-slim"}
+```
+
+### Step 3: EXECUTE
+```json
+{"command": "...", "image": "tag:common/python-ml/python:3.11-slim"}
+```
+
+## Tagging Convention
+
+Format: `{scope}/{purpose}/{base}:{tag}`
+
+| Tag | Use Case |
+|-----|----------|
+| `common/python-ml/python:3.11-slim` | ML libraries |
+| `common/rust-toolchain/ubuntu:noble` | Rust compiler |
+| `myproject/dev-env/python:3.11-slim` | Project-specific |
+
+---
+
+## Common Patterns
+
+### Basic Execution
+```json
+{"command": "python -c 'print(1+1)'", "image": "tag:python:3.11"}
+```
+
+### File Sync + Execute
+```json
+// 1. rsync → directory_state_id
+{"source": "/project", "destination": "/app", "exclude": ["__pycache__"]}
+// 2. run with directory_state_id
+{"command": "python /app/main.py", "image": "...", "directory_state_id": "ds_xxx"}
+```
+
+### Parallel Execution
+```json
+// Use wait=false, then wait_operations
+{"command": "test_a.py", "image": "...", "wait": false}
+{"command": "test_b.py", "image": "...", "wait": false}
+```
+
+> For detailed patterns: `contree://guide/workflow`, `contree://guide/async`
+
+---
+
+## On-Demand Resources
+
+For detailed documentation, use MCP resources:
+
+| Resource | Content |
+|----------|---------|
+| `contree://guide/workflow` | Mandatory workflow and decision tree |
+| `contree://guide/reference` | All tools with parameters |
+| `contree://guide/quickstart` | Common workflows and best practices |
+| `contree://guide/state` | Image state, rollback, disposable mode |
+| `contree://guide/async` | Parallel execution patterns |
+| `contree://guide/tagging` | Tagging convention details |
+| `contree://guide/errors` | Error handling and debugging |
+
+---
+
+## Code Structure
+
+```
+contree_mcp/
+├── server.py            # MCP server setup
+├── app.py               # FastMCP app with tools/resources
+├── client.py            # Contree API client
+├── cache.py             # SQLite cache (credentials, images)
+├── file_cache.py        # SQLite file cache
+├── auth/                # Registry authentication
+│   ├── __init__.py      # Exports RegistryAuth, RegistryToken
+│   └── registry.py      # OCI token discovery and validation
+├── tools/               # Tool implementations
+│   ├── import_image.py  # Requires auth or anonymous flag
+│   ├── registry_auth.py # Validate and store credentials
+│   └── registry_token_obtain.py  # Open browser for PAT
+└── resources/           # Resource implementations
+    ├── static.py        # StaticResource for guides
+    └── guide.py         # Guide content (SECTIONS dict)
+```
+
+---
+
+## Development
+
+```bash
+# Tests (must pass)
+uv run pytest tests/ -v
+
+# Lint
+uv run ruff check contree_mcp
+uv run ruff format contree_mcp
+
+# Type check
+uv run mypy contree_mcp
+```

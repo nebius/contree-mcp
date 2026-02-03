@@ -1,0 +1,79 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "contree-mcp"
+version = "0.1.0"
+description = "MCP server for Contree container management system"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "aiosqlite>=0.19.0",
+    "argclass>=1.0.0",
+    "httpx>=0.28.0",        # transitive dependency from mcp, so we have to use it and pin version here
+    "mcp>=1.0.0",
+    "pydantic>=2.0.0",      # transitive dependency from mcp, so we have to use it and pin version here
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "mypy>=1.8.0",
+    "ruff>=0.2.0",
+    "sphinx>=7.0.0",
+    "furo>=2024.0.0",
+    "myst-parser>=3.0.0",
+    "sphinx-design>=0.5.0",
+    "sphinx-copybutton>=0.5.0",
+    "sphinxcontrib-mermaid>=0.9.0",
+]
+
+[project.scripts]
+contree-mcp = "contree_mcp.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["contree_mcp"]
+
+[tool.ruff]
+line-length = 119
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+exclude = ["docs/"]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+strict = false
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
+check_untyped_defs = true
+disable_error_code = ["type-arg", "union-attr", "var-annotated", "misc", "arg-type", "attr-defined"]
+
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "integration: marks tests as integration tests (require CONTREE_API_URL and CONTREE_API_TOKEN)",
+    "slow: marks tests as slow (large file operations)",
+]
+
+[dependency-groups]
+dev = [
+    "mypy>=1.19.1",
+    "pytest>=9.0.2",
+    "pytest-asyncio>=1.3.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.14.13",
+]

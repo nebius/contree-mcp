@@ -1,0 +1,35 @@
+# Contree MCP
+
+> Isolated cloud container execution for AI agents via Model Context Protocol.
+> 15 tools for running code in sandboxed microVMs with persistent images,
+> file sync, and async execution. Every container is isolated, every image
+> is immutable, mistakes are free.
+
+Key Rules:
+1. Always `list_images` before `import_image` to check for existing images
+2. Reuse `directory_state_id` from rsync across multiple run calls
+3. Use `disposable=false` only when you need to save state (installs, builds)
+4. For parallel execution: `wait=false` then `wait_operations`
+5. Use `env` parameter for environment variables, not shell export
+6. Use `list_files`/`read_file` instead of `run("ls")`/`run("cat")` for free inspection
+
+For detailed patterns, access via MCP resources:
+- `contree://guide/workflow` - Complete workflow patterns
+- `contree://guide/quickstart` - Common workflows and best practices
+- `contree://guide/async` - Parallel execution
+- `contree://guide/errors` - Error handling and debugging
+
+## Documentation
+
+- [Quickstart](quickstart.html) - Run your first container
+- [Concepts](concepts/index.html) - Core concepts and workflows
+- [Tools](tools/index.html) - All 15 tools reference
+- [Prompts](prompts/index.html) - 10 MCP prompts for common workflows
+- [Resources](resources.html) - MCP resource templates
+- [Patterns](patterns.html) - Common patterns and anti-patterns
+- [Cheatsheet](cheatsheet.html) - Quick reference
+
+## Reference
+
+- [Troubleshooting](integration/troubleshooting.html) - Common issues
+- [Glossary](reference/glossary.html) - Term definitions

@@ -1,0 +1,9 @@
+.*
+!.github
+!.gitignore
+_build
+__pycache__
+*.pyc
+*.egg-info
+dist/
+.secrets
