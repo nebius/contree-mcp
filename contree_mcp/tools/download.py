@@ -65,7 +65,7 @@ async def async_file_writer(destination: Path, stream: AsyncIterable[bytes]) -> 
         queue.put_nowait(None)  # Signal end of stream
 
     written = await task
-    await asyncio.to_thread(tmp_path.rename, destination)
+    await asyncio.to_thread(os.replace, tmp_path, destination)
     return written
 
 
