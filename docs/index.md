@@ -80,6 +80,10 @@ Visit `http://localhost:9452/` for setup guides, tool reference, and best practi
 The HTTP interface with Setup, Instructions, Tools, Resources, and Guides.
 ```
 
+## Security
+
+To report security issues, see [Security](security.md).
+
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
@@ -97,4 +101,5 @@ patterns
 cheatsheet
 integration/index
 reference/index
+security
 ```
