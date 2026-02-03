@@ -328,8 +328,10 @@ Use this to rollback to any ancestor or understand how an image was created.
 ## Dependencies
 
 - `mcp` - Model Context Protocol SDK
-- `aiohttp` - Async HTTP client
+- `httpx` - Async HTTP client
 - `argclass` - Argument parsing
+- `aiosqlite` - Async SQLite database
+- `pydantic` - Data validation
 
 ## Development
 
