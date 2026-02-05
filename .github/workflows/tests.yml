@@ -25,13 +25,6 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.DEFAULT_PYTHON }}
 
-      - name: Cache venv
-        id: cache-venv
-        uses: actions/cache@v5
-        with:
-          path: .venv
-          key: venv-${{ github.job }}-${{ runner.os }}-${{ env.DEFAULT_PYTHON }}-${{ hashFiles('uv.lock') }}
-
       - name: Install dependencies
         run: uv sync --group dev
 
@@ -51,13 +44,6 @@ jobs:
 
       - name: Set up Python
         run: uv python install ${{ env.DEFAULT_PYTHON }}
-
-      - name: Cache venv
-        id: cache-venv
-        uses: actions/cache@v5
-        with:
-          path: .venv
-          key: venv-${{ github.job }}-${{ runner.os }}-${{ env.DEFAULT_PYTHON }}-${{ hashFiles('uv.lock') }}
 
       - name: Install dependencies
         run: uv sync --group dev
@@ -88,13 +74,6 @@ jobs:
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
 
-      - name: Cache venv
-        id: cache-venv
-        uses: actions/cache@v5
-        with:
-          path: .venv
-          key: venv-${{ github.job }}-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('uv.lock') }}
-  
       - name: Install dependencies
         run: uv sync --group dev
 
