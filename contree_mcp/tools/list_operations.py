@@ -8,10 +8,11 @@ class ListOperationsOutput(BaseModel):
     operations: list[OperationSummary] = Field(description="List of operations")
 
 
+# noinspection PyShadowingBuiltins
 async def list_operations(
     limit: int = 100,
     status: OperationStatus | None = None,
-    kind: OperationKind | None = None,
+    type: OperationKind | None = None,
     since: str | None = None,
 ) -> ListOperationsOutput:
     """
@@ -39,7 +40,7 @@ async def list_operations(
     operations = await client.list_operations(
         limit=limit,
         status=status,
-        kind=kind,
+        kind=type,
         since=since,
     )
 
