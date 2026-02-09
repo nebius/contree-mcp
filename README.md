@@ -1,17 +1,17 @@
-# Contree MCP Server
+# ConTree MCP Server
 
 [![PyPI](https://img.shields.io/pypi/v/contree-mcp.svg)](https://pypi.org/project/contree-mcp/)
 [![Tests](https://github.com/nebius/contree-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/nebius/contree-mcp/actions/workflows/tests.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-Run code in isolated cloud containers. Contree gives AI agents secure sandboxed execution environments with full root access, network, and persistent images.
+Run code in isolated cloud containers. ConTree gives AI agents secure sandboxed execution environments with full root access, network, and persistent images.
 
-## Why Contree?
+## Why ConTree?
 
 **Fearless experimentation.** Agents can:
 - Run destructive commands (`rm -rf /`, `dd`, kernel exploits) - nothing escapes the sandbox
 - Make mistakes freely - revert to any previous image UUID at zero cost
-- Execute potentially dangerous user requests - Contree IS the safe runtime for risky operations
+- Execute potentially dangerous user requests - ConTree IS the safe runtime for risky operations
 - Break things on purpose - corrupt filesystems, crash kernels, test failure modes
 
 Every container is isolated. Every image is immutable. Branching is cheap. Mistakes are free.
@@ -124,9 +124,9 @@ uv pip install --break-system-packages --python /usr/bin/python3 contree-mcp
 
 | Tool | Description |
 |------|-------------|
-| `contree_upload` | Upload a file to Contree for use in containers |
+| `contree_upload` | Upload a file to ConTree for use in containers |
 | `contree_download` | Download a file from a container image to local filesystem |
-| `contree_rsync` | Sync local files to Contree with caching and deduplication |
+| `contree_rsync` | Sync local files to ConTree with caching and deduplication |
 
 ### Image Inspection
 
@@ -204,7 +204,7 @@ MCP resource templates expose image files and documentation directly via URIs. F
 
 **contree_run:**
 ```json
-{"command": "python -c 'print(\"Hello from Contree!\")'", "image": "tag:python:3.11"}
+{"command": "python -c 'print(\"Hello from ConTree!\")'", "image": "tag:python:3.11"}
 ```
 
 ### Parallel Execution (Async Pattern)
