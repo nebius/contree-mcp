@@ -42,7 +42,8 @@ class TestSetTagRemove(TestCase):
     @pytest.fixture
     def fake_responses(self) -> FakeResponses:
         return {
-            "DELETE /images/{uuid}/tag": FakeResponse(
+            "DELETE /images/{uuid}/tag": FakeResponse(body={}),
+            "GET /inspect/{uuid}/": FakeResponse(
                 body=Image(uuid="img-1", tag=None, created_at="2024-01-01T00:00:00Z")
             ),
         }

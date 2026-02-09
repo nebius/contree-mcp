@@ -156,7 +156,8 @@ class TestTagImage(TestCase):
     def fake_responses(self) -> FakeResponses:
         return {
             "PATCH /images/img-123/tag": FakeResponse(body=make_image(uuid="img-123", tag="myapp:v1").model_dump()),
-            "DELETE /images/img-123/tag": FakeResponse(body=make_image(uuid="img-123", tag=None).model_dump()),
+            "DELETE /images/img-123/tag": FakeResponse(body={}),
+            "GET /inspect/img-123/": FakeResponse(body=make_image(uuid="img-123", tag=None).model_dump()),
         }
 
     @pytest.mark.asyncio

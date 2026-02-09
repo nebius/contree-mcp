@@ -20,6 +20,12 @@ class TestRsyncValidation(TestCase):
         with pytest.raises(ValueError, match="absolute path"):
             await rsync(source="relative/path", destination="/app")
 
+    @pytest.mark.asyncio
+    async def test_rejects_nonexistent_source_path(self, tmp_path: Path):
+        nonexistent = str(tmp_path / "nonexistent")
+        with pytest.raises(ValueError, match="source path does not exist"):
+            await rsync(source=nonexistent, destination="/app")
+
 
 class TestRsync(TestCase):
     @pytest.fixture

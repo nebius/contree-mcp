@@ -32,10 +32,8 @@ token = <TOKEN HERE>
 
 #### Claude Code
 
-Add to `~/.claude/settings.json`:
-
-```json
-{"mcpServers": {"contree": {"command": "uvx", "args": ["contree-mcp"]}}}
+```bash
+claude mcp add --transport stdio contree -- $(which uvx) contree-mcp
 ```
 
 Restart Claude Code or run `/mcp` to verify.
