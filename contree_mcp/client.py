@@ -7,7 +7,7 @@ import logging
 import platform
 import sys
 from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import cached_property
 from io import BytesIO
 from types import MappingProxyType
@@ -333,8 +333,11 @@ class ContreeClient:
         return response.body
 
     async def untag_image(self, image_uuid: str) -> Image:
-        response = await self._request("DELETE", f"/images/{image_uuid}/tag", model=Image)
-        return response.body
+        async with self._stream_request("DELETE", f"/images/{image_uuid}/tag") as response:
+            async for _ in response:
+                pass
+            log.debug("DELETE /images/%s/tag -> %d", image_uuid, response.status)
+        return await self.get_image(image_uuid)
 
     async def get_image_by_tag(self, tag: str) -> Image:
         response = await self._request("GET", "/inspect/", model=Image, params={"tag": tag}, follow_redirects=True)
@@ -611,7 +614,8 @@ class ContreeClient:
             await asyncio.shield(self.cancel_operation(operation_id))
             raise ContreeError(f"Operation {operation_id} timed out after {max_wait}s") from e
         except asyncio.CancelledError:
-            await asyncio.shield(self.cancel_operation(operation_id))
+            with suppress(Exception):
+                await asyncio.shield(self.cancel_operation(operation_id))
             raise
 
     def _track_operation(

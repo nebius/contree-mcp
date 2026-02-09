@@ -34,6 +34,8 @@ async def rsync(
     source_path = Path(source).expanduser()
     if not source_path.is_absolute():
         raise ValueError(f"source must be an absolute path, got: {source}")
+    if not source_path.exists():
+        raise ValueError(f"source path does not exist: {source_path}")
 
     destination = destination.rstrip("/")
     exclude = exclude or []

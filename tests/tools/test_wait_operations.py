@@ -323,6 +323,76 @@ class TestWaitOperationsTimeout(TestCase):
         assert len(result.completed) >= 1 or result.timed_out
 
 
+class TestWaitModeAnyCancellation(TestCase):
+    """Test that mode='any' explicitly cancels remaining backend operations."""
+
+    @pytest.fixture
+    def fake_responses(self) -> FakeResponses:
+        return {
+            # op-fast completes immediately
+            "GET /operations/op-fast": FakeResponse(
+                body={
+                    "uuid": "op-fast",
+                    "kind": OperationKind.INSTANCE.value,
+                    "status": OperationStatus.SUCCESS.value,
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "error": None,
+                    "metadata": None,
+                    "result": OperationResult(image="img-fast", tag=None),
+                }
+            ),
+            # op-slow stays EXECUTING (never completes on its own)
+            "GET /operations/op-slow": FakeResponse(
+                body={
+                    "uuid": "op-slow",
+                    "kind": OperationKind.INSTANCE.value,
+                    "status": OperationStatus.EXECUTING.value,
+                    "created_at": "2024-01-01T00:00:00Z",
+                    "error": None,
+                    "metadata": None,
+                    "result": None,
+                }
+            ),
+            # DELETE handler for cancel_operation
+            "DELETE /operations/{uuid}": FakeResponse(
+                body={"uuid": "op-slow", "status": "CANCELLED"},
+            ),
+        }
+
+    @pytest.mark.asyncio
+    async def test_mode_any_cancels_remaining_operations(self) -> None:
+        """Test that mode='any' cancels backend operations not in results."""
+        from unittest.mock import patch
+
+        client = CLIENT.get()
+        original_cancel = client.cancel_operation
+
+        cancel_calls: list[str] = []
+
+        async def tracking_cancel(op_id: str) -> OperationStatus:
+            cancel_calls.append(op_id)
+            return await original_cancel(op_id)
+
+        with patch.object(client, "cancel_operation", side_effect=tracking_cancel):
+            result = await wait_operations(
+                operation_ids=["op-fast", "op-slow"],
+                mode="any",
+                timeout=5.0,
+            )
+
+        # op-fast should have completed
+        assert "op-fast" in result.completed
+        assert result.results["op-fast"].status == OperationStatus.SUCCESS
+
+        # op-slow should be in cancelled list
+        assert "op-slow" in result.cancelled
+
+        # cancel_operation should have been called for op-slow
+        assert "op-slow" in cancel_calls
+
+        assert result.timed_out is False
+
+
 class TestWaitMixedOperations(TestCase):
     """Test wait_operations with multiple operations."""
 

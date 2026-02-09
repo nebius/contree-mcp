@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -66,6 +67,13 @@ async def wait_operations(
             task.cancel()
 
     await asyncio.gather(*pending, return_exceptions=True)
+
+    # Explicitly cancel backend operations for ops not yet in results
+    if mode == "any":
+        for op_id in operation_ids:
+            if op_id not in results:
+                with contextlib.suppress(Exception):
+                    await client.cancel_operation(op_id)
 
     cancelled_ids = [op_id for op_id in operation_ids if op_id not in results]
     # timed_out is True only if we have pending tasks AND mode was "all"

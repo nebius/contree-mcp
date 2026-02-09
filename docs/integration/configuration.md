@@ -56,17 +56,8 @@ With credentials stored in `~/.config/contree/mcp.ini`, MCP client configs are m
 
 ### Claude Code
 
-`~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "contree": {
-      "command": "uvx",
-      "args": ["contree-mcp"]
-    }
-  }
-}
+```bash
+claude mcp add --transport stdio contree -- $(which uvx) contree-mcp
 ```
 
 ### HTTP Mode

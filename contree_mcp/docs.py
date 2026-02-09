@@ -708,7 +708,7 @@ EOF</pre>
         </div>
         <div class="tab-content active" data-mode="stdio">
           <p>Using CLI:</p>
-<pre>claude mcp add contree -- uvx contree-mcp</pre>
+<pre>claude mcp add --transport stdio contree -- $(which uvx) contree-mcp</pre>
           <p>Or add to config file (<code>~/.claude.json</code> or <code>.mcp.json</code>):</p>
 <pre>{{
   "mcpServers": {{
