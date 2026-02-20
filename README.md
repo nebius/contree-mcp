@@ -18,7 +18,11 @@ Every container is isolated. Every image is immutable. Branching is cheap. Mista
 
 ## Quick Setup
 
-### 1. Create Config File
+### 1. Get an API Token
+
+Contree is in **Early Access**. To get an API token, fill out the request form at [contree.dev](https://contree.dev).
+
+### 2. Create Config File
 
 Store credentials in `~/.config/contree/mcp.ini`:
 
@@ -28,7 +32,7 @@ url = https://contree.dev/
 token = <TOKEN HERE>
 ```
 
-### 2. Configure Your MCP Client
+### 3. Configure Your MCP Client
 
 #### Claude Code
 

@@ -9,10 +9,7 @@ Run your first container in 5 minutes.
 
 ### Getting an API Token
 
-1. Visit [Nebius Cloud Console](https://console.nebius.cloud/)
-2. Navigate to **Settings** → **API Tokens**
-3. Click **Create Token** and copy the generated value
-4. Store securely—tokens are shown only once
+Contree is in **Early Access**. To get an API token, fill out the request form at [contree.dev](https://contree.dev).
 
 ## Installation
 
