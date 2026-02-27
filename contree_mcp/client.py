@@ -480,6 +480,14 @@ class ContreeClient:
         log.debug("Uploaded file: uuid=%s sha256=%s...", response.body.uuid, response.body.sha256[:16])
         return response.body
 
+    async def check_file_exists_by_hash(self, sha256: str) -> bool:
+        """Check if file exists on server by SHA256 hash. Always hits server (no cache)."""
+        try:
+            status = await self._head_request("/files", params={"sha256": sha256})
+            return status == 200
+        except Exception:
+            return False
+
     async def check_file_exists(self, file_uuid: str) -> bool:
         """Check if an uploaded file exists by UUID. File existence is immutable - no TTL needed."""
         entry = await self.cache.get("file_exists_by_uuid", file_uuid)

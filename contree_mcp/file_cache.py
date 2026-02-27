@@ -79,7 +79,8 @@ class FileCache:
             mode INTEGER NOT NULL,
             sha256 TEXT NOT NULL,
             uuid TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(sha256);
 
@@ -88,7 +89,8 @@ class FileCache:
             uuid TEXT NOT NULL,
             name TEXT,
             destination TEXT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
         );
 
         CREATE UNIQUE INDEX IF NOT EXISTS idx_directory_state_uuid ON directory_state(uuid);
@@ -104,6 +106,7 @@ class FileCache:
     """
 
     UPLAOD_CONCURRENCY = 10
+    REVALIDATION_INTERVAL = timedelta(hours=24)
 
     def __init__(self, db_path: Path | None = None, retention_days: int = 120) -> None:
         self.db_path = db_path or self.DEFAULT_PATH
@@ -128,6 +131,14 @@ class FileCache:
             await conn.execute("PRAGMA journal_mode=WAL")
             await conn.execute("PRAGMA foreign_keys=ON")
             await conn.executescript(self.SCHEMA)
+            # Migration: add updated_at column if missing (for existing DBs)
+            # Uses NULL default since SQLite disallows CURRENT_TIMESTAMP in ALTER TABLE.
+            # _needs_revalidation treats NULL as "needs revalidation".
+            for table in ("files", "directory_state"):
+                async with conn.execute(f"PRAGMA table_info({table})") as cursor:
+                    columns = {row["name"] for row in await cursor.fetchall()}
+                if "updated_at" not in columns:
+                    await conn.execute(f"ALTER TABLE {table} ADD COLUMN updated_at TIMESTAMP")
             await conn.commit()
             self.__conn = conn
 
@@ -193,7 +204,8 @@ class FileCache:
                 ino = excluded.ino,
                 mode = excluded.mode,
                 sha256 = excluded.sha256,
-                uuid = excluded.uuid
+                uuid = excluded.uuid,
+                updated_at = CURRENT_TIMESTAMP
             """,
             (
                 path_str,
@@ -243,6 +255,10 @@ class FileCache:
                     """,
                     (directory_state, file_state.uuid, target_path, file_state.mode),
                 )
+            await self.conn.execute(
+                "UPDATE directory_state SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (directory_state,),
+            )
             await self.conn.commit()
             return directory_state
 
@@ -281,6 +297,75 @@ class FileCache:
             await self.conn.commit()
             return directory_state_id
 
+    async def _needs_revalidation(self, directory_state_id: int) -> bool:
+        """Check if directory state needs revalidation (updated_at >24h ago or NULL)."""
+        async with self.conn.execute(
+            "SELECT updated_at FROM directory_state WHERE id = ?",
+            (directory_state_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return True
+        updated_at = row["updated_at"]
+        if updated_at is None:
+            return True
+        if isinstance(updated_at, str):
+            updated_at = datetime.fromisoformat(updated_at)
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) - updated_at > self.REVALIDATION_INTERVAL
+
+    async def _revalidate_files(
+        self,
+        client: ContreeClient,
+        directory_state_id: int,
+        synced_files: set[FileState],
+        root: Path,
+        destination: str,
+    ) -> None:
+        """Revalidate file hashes against the server and re-upload stale files."""
+        if not synced_files:
+            await self.conn.execute(
+                "UPDATE directory_state SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (directory_state_id,),
+            )
+            await self.conn.commit()
+            return
+
+        # Check all file SHA256 hashes against server in parallel
+        async def check_file(file_state: FileState) -> tuple[FileState, bool]:
+            exists = await client.check_file_exists_by_hash(file_state.sha256)
+            return file_state, exists
+
+        results = await asyncio.gather(*[check_file(f) for f in synced_files if f.sha256])
+        stale_files = [fs for fs, exists in results if not exists]
+
+        if stale_files:
+            # Invalidate cache entries for stale files
+            for file_state in stale_files:
+                await client.cache.delete("file_by_hash", file_state.sha256)
+                if file_state.uuid:
+                    await client.cache.delete("file_exists_by_uuid", file_state.uuid)
+
+            # Re-upload stale files
+            uploaded = await asyncio.gather(*[self._upload_file(client, f) for f in stale_files])
+
+            # Update directory_state_file entries with new UUIDs
+            for file_state in uploaded:
+                relative_path = file_state.path.relative_to(root)
+                target_path = f"{destination}/{relative_path}"
+                await self.conn.execute(
+                    "UPDATE directory_state_file SET uuid = ? WHERE state_id = ? AND target_path = ?",
+                    (file_state.uuid, directory_state_id, target_path),
+                )
+
+        # Touch updated_at to reset the 24h timer
+        await self.conn.execute(
+            "UPDATE directory_state SET updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (directory_state_id,),
+        )
+        await self.conn.commit()
+
     async def sync_directory(
         self,
         client: ContreeClient,
@@ -317,6 +402,12 @@ class FileCache:
 
         if directory_state is not None:
             synced_files = await self.get_synced_directory_files(directory_state)
+
+            # Revalidate if >24h since last sync
+            if await self._needs_revalidation(directory_state):
+                await self._revalidate_files(client, directory_state, synced_files, path, destination)
+                synced_files = await self.get_synced_directory_files(directory_state)
+
             if local_files == synced_files:
                 return int(directory_state)
 

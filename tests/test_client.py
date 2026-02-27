@@ -31,6 +31,33 @@ async def tmp_cache(tmp_path: Path) -> AsyncIterator[Cache]:
         yield cache
 
 
+class TestOperationStatusStr:
+    """Tests for OperationStatus.__str__ method."""
+
+    def test_str_returns_value(self):
+        assert str(OperationStatus.PENDING) == "PENDING"
+        assert str(OperationStatus.SUCCESS) == "SUCCESS"
+        assert str(OperationStatus.FAILED) == "FAILED"
+        assert str(OperationStatus.CANCELLED) == "CANCELLED"
+        assert str(OperationStatus.EXECUTING) == "EXECUTING"
+        assert str(OperationStatus.ASSIGNED) == "ASSIGNED"
+
+    def test_f_string_uses_value(self):
+        """Test that f-string formatting uses the value, not Enum repr."""
+        assert f"{OperationStatus.SUCCESS}" == "SUCCESS"
+
+
+class TestOperationKindStr:
+    """Tests for OperationKind.__str__ method."""
+
+    def test_str_returns_value(self):
+        assert str(OperationKind.INSTANCE) == "instance"
+        assert str(OperationKind.IMAGE_IMPORT) == "image_import"
+
+    def test_f_string_uses_value(self):
+        assert f"{OperationKind.INSTANCE}" == "instance"
+
+
 class TestContreeClientInit:
     """Tests for ContreeClient initialization."""
 
@@ -828,6 +855,54 @@ class TestContreeError:
         error = ContreeError("Something went wrong")
         assert error.message == "Something went wrong"
         assert error.status_code is None
+
+
+class TestCheckFileExistsByHash(TestCase):
+    """Tests for check_file_exists_by_hash method."""
+
+    @pytest.fixture
+    def fake_responses(self) -> FakeResponses:
+        return {
+            "HEAD /files": FakeResponse(http_status=HTTPStatus.OK),
+        }
+
+    @pytest.mark.asyncio
+    async def test_check_file_exists_by_hash_true(self, contree_client: ContreeClient):
+        """Test file exists by hash returns True."""
+        exists = await contree_client.check_file_exists_by_hash("abc123")
+        assert exists is True
+
+
+class TestCheckFileExistsByHashNotFound(TestCase):
+    """Tests for check_file_exists_by_hash returns False on 404."""
+
+    @pytest.fixture
+    def fake_responses(self) -> FakeResponses:
+        return {
+            "HEAD /files": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
+        }
+
+    @pytest.mark.asyncio
+    async def test_check_file_exists_by_hash_not_found(self, contree_client: ContreeClient):
+        """Test file exists by hash returns False for 404."""
+        exists = await contree_client.check_file_exists_by_hash("nonexistent")
+        assert exists is False
+
+
+class TestCheckFileExistsByHashException(TestCase):
+    """Tests for check_file_exists_by_hash returns False on server error."""
+
+    @pytest.fixture
+    def fake_responses(self) -> FakeResponses:
+        return {
+            "HEAD /files": FakeResponse(http_status=HTTPStatus.INTERNAL_SERVER_ERROR),
+        }
+
+    @pytest.mark.asyncio
+    async def test_check_file_exists_by_hash_on_exception(self, contree_client: ContreeClient):
+        """Test check_file_exists_by_hash returns False on exception."""
+        exists = await contree_client.check_file_exists_by_hash("abc123")
+        assert exists is False
 
 
 class TestCheckFileExists(TestCase):
