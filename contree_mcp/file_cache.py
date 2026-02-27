@@ -334,16 +334,14 @@ class FileCache:
 
         # Check all file SHA256 hashes against server in parallel
         # Filter guarantees sha256 is non-None; build typed list for mypy
-        files_with_hash: list[tuple[FileState, str]] = [
-            (f, f.sha256) for f in synced_files if f.sha256 is not None
-        ]
+        files_with_hash: list[tuple[FileState, str]] = [(f, f.sha256) for f in synced_files if f.sha256 is not None]
 
         async def check_file(file_state: FileState, sha256: str) -> tuple[FileState, bool]:
             exists = await client.check_file_exists_by_hash(sha256)
             return file_state, exists
 
         results = await asyncio.gather(*[check_file(f, h) for f, h in files_with_hash])
-        stale_files = [(fs, h) for (fs, _exists), (_, h) in zip(results, files_with_hash) if not _exists]
+        stale_files = [(fs, h) for (fs, _exists), (_, h) in zip(results, files_with_hash, strict=True) if not _exists]
 
         if stale_files:
             # Invalidate cache entries for stale files
