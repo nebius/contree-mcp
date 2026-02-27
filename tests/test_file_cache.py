@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from http import HTTPStatus
 from pathlib import Path
 
 import pytest
@@ -672,3 +673,243 @@ class TestSyncDirectory:
             row = await cursor.fetchone()
             assert row is not None
             assert row["cnt"] == 1  # Only keep.txt (skip.pyc excluded)
+
+
+class TestRevalidation:
+    """Tests for file revalidation after 24h."""
+
+    @pytest.fixture
+    def fake_responses(self) -> FakeResponses:
+        return {
+            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
+            "HEAD /files": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
+        }
+
+    @pytest.fixture(autouse=True)
+    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
+        return contree_client
+
+    @pytest.mark.asyncio
+    async def test_revalidation_reuploads_stale_files(
+        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+    ) -> None:
+        """Test that files are re-uploaded when server returns 404 after 24h."""
+        sync_dir = tmp_path / "sync_test"
+        sync_dir.mkdir()
+        (sync_dir / "file1.txt").write_text("content1")
+
+        # First sync
+        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        # Age the directory state to trigger revalidation
+        await file_cache.conn.execute(
+            "UPDATE directory_state SET updated_at = datetime('now', '-25 hours') WHERE id = ?",
+            (state_id,),
+        )
+        await file_cache.conn.commit()
+
+        # Second sync - should trigger revalidation and re-upload
+        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        assert state_id == state_id2
+        files = await file_cache.get_synced_directory_files(state_id2)
+        assert len(files) == 1
+        file_state = next(iter(files))
+        assert file_state.uuid == "file-uuid-1"
+
+    @pytest.mark.asyncio
+    async def test_revalidation_updates_timestamp(
+        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+    ) -> None:
+        """Test that revalidation resets the updated_at timestamp."""
+        sync_dir = tmp_path / "sync_test"
+        sync_dir.mkdir()
+        (sync_dir / "file1.txt").write_text("content1")
+
+        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        # Age the directory state
+        await file_cache.conn.execute(
+            "UPDATE directory_state SET updated_at = datetime('now', '-25 hours') WHERE id = ?",
+            (state_id,),
+        )
+        await file_cache.conn.commit()
+
+        # Sync again triggers revalidation
+        await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        # Verify updated_at was refreshed (no longer needs revalidation)
+        needs = await file_cache._needs_revalidation(state_id)
+        assert needs is False
+
+    @pytest.mark.asyncio
+    async def test_revalidation_with_multiple_files(
+        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+    ) -> None:
+        """Test revalidation with multiple files where server lost all of them."""
+        sync_dir = tmp_path / "sync_test"
+        sync_dir.mkdir()
+        (sync_dir / "file1.txt").write_text("content1")
+        (sync_dir / "file2.txt").write_text("content2")
+        (sync_dir / "file3.txt").write_text("content3")
+
+        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        # Age the directory state
+        await file_cache.conn.execute(
+            "UPDATE directory_state SET updated_at = datetime('now', '-25 hours') WHERE id = ?",
+            (state_id,),
+        )
+        await file_cache.conn.commit()
+
+        # Second sync - revalidation should re-upload all files
+        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        assert state_id == state_id2
+        files = await file_cache.get_synced_directory_files(state_id2)
+        assert len(files) == 3
+
+    @pytest.mark.asyncio
+    async def test_no_revalidation_within_24h(
+        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+    ) -> None:
+        """Test that revalidation is not triggered within 24h."""
+        sync_dir = tmp_path / "sync_test"
+        sync_dir.mkdir()
+        (sync_dir / "file1.txt").write_text("content1")
+
+        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        # Immediate second sync - no revalidation needed
+        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        assert state_id1 == state_id2
+
+    @pytest.mark.asyncio
+    async def test_needs_revalidation_migrated_db(self, tmp_path: Path) -> None:
+        """Test that migrated DB rows (NULL updated_at) trigger revalidation."""
+        import aiosqlite
+
+        db_path = tmp_path / "migrated.db"
+        # Create a DB with the OLD schema (no updated_at column)
+        async with aiosqlite.connect(str(db_path)) as conn:
+            await conn.executescript("""
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL,
+                    symlink_to TEXT, size INTEGER NOT NULL, mtime INTEGER NOT NULL,
+                    ino INTEGER NOT NULL, mode INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL, uuid TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS directory_state (
+                    id INTEGER PRIMARY KEY, uuid TEXT NOT NULL, name TEXT,
+                    destination TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS directory_state_file (
+                    id INTEGER PRIMARY KEY,
+                    state_id INTEGER NOT NULL REFERENCES directory_state(id) ON DELETE CASCADE,
+                    uuid TEXT NOT NULL, target_path TEXT NOT NULL,
+                    target_mode INTEGER NOT NULL, UNIQUE(state_id, target_path)
+                );
+            """)
+            await conn.execute(
+                "INSERT INTO directory_state (uuid, name, destination) VALUES (?, ?, ?)",
+                ("test-uuid", "test", "/app"),
+            )
+            await conn.commit()
+
+        # Open with new code (runs migration, adds updated_at via ALTER TABLE)
+        async with FileCache(db_path=db_path) as cache:
+            async with cache.conn.execute("SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid",)) as cursor:
+                row = await cursor.fetchone()
+                assert row is not None
+
+            # Migrated row has NULL updated_at (ALTER TABLE DEFAULT only applies to new rows)
+            needs = await cache._needs_revalidation(row["id"])
+            assert needs is True
+
+    @pytest.mark.asyncio
+    async def test_needs_revalidation_recent(self, file_cache: FileCache) -> None:
+        """Test that recent updated_at does not trigger revalidation."""
+        await file_cache.conn.execute(
+            "INSERT INTO directory_state (uuid, name, destination) VALUES (?, ?, ?)",
+            ("test-uuid-recent", "test", "/app"),
+        )
+        await file_cache.conn.commit()
+
+        async with file_cache.conn.execute(
+            "SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid-recent",)
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row is not None
+
+        needs = await file_cache._needs_revalidation(row["id"])
+        assert needs is False
+
+    @pytest.mark.asyncio
+    async def test_needs_revalidation_old(self, file_cache: FileCache) -> None:
+        """Test that old updated_at triggers revalidation."""
+        await file_cache.conn.execute(
+            "INSERT INTO directory_state (uuid, name, destination) VALUES (?, ?, ?)",
+            ("test-uuid-old", "test", "/app"),
+        )
+        await file_cache.conn.execute(
+            "UPDATE directory_state SET updated_at = datetime('now', '-25 hours') WHERE uuid = ?",
+            ("test-uuid-old",),
+        )
+        await file_cache.conn.commit()
+
+        async with file_cache.conn.execute(
+            "SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid-old",)
+        ) as cursor:
+            row = await cursor.fetchone()
+            assert row is not None
+
+        needs = await file_cache._needs_revalidation(row["id"])
+        assert needs is True
+
+
+class TestRevalidationNoStaleFiles:
+    """Tests for revalidation when server still has all files."""
+
+    @pytest.fixture
+    def fake_responses(self) -> FakeResponses:
+        return {
+            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
+            "HEAD /files": FakeResponse(),  # 200 OK - files still exist on server
+        }
+
+    @pytest.fixture(autouse=True)
+    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
+        return contree_client
+
+    @pytest.mark.asyncio
+    async def test_revalidation_no_reupload_when_files_exist(
+        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+    ) -> None:
+        """Test that no re-upload happens when server still has files after 24h."""
+        sync_dir = tmp_path / "sync_test"
+        sync_dir.mkdir()
+        (sync_dir / "file1.txt").write_text("content1")
+
+        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        # Get the original file uuid
+        files_before = await file_cache.get_synced_directory_files(state_id)
+        uuid_before = next(iter(files_before)).uuid
+
+        # Age the directory state
+        await file_cache.conn.execute(
+            "UPDATE directory_state SET updated_at = datetime('now', '-25 hours') WHERE id = ?",
+            (state_id,),
+        )
+        await file_cache.conn.commit()
+
+        # Sync again - revalidation should find files still exist, no re-upload
+        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+
+        assert state_id == state_id2
+        files_after = await file_cache.get_synced_directory_files(state_id2)
+        uuid_after = next(iter(files_after)).uuid
+        assert uuid_before == uuid_after  # UUID unchanged - no re-upload happened

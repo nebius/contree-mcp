@@ -219,6 +219,9 @@ class OperationStatus(str, Enum):
     CANCELLED = "CANCELLED"
     ASSIGNED = "ASSIGNED"
 
+    def __str__(self) -> str:
+        return self.value
+
     def is_terminal(self) -> bool:
         cls = self.__class__
         return self in {cls.SUCCESS, cls.FAILED, cls.CANCELLED}
@@ -227,6 +230,9 @@ class OperationStatus(str, Enum):
 class OperationKind(str, Enum):
     INSTANCE = "instance"
     IMAGE_IMPORT = "image_import"
+
+    def __str__(self) -> str:
+        return self.value
 
 
 class OperationResult(BaseModel):
