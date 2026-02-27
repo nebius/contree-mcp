@@ -313,7 +313,7 @@ class FileCache:
             updated_at = datetime.fromisoformat(updated_at)
         if updated_at.tzinfo is None:
             updated_at = updated_at.replace(tzinfo=timezone.utc)
-        return datetime.now(timezone.utc) - updated_at > self.REVALIDATION_INTERVAL
+        return bool(datetime.now(timezone.utc) - updated_at > self.REVALIDATION_INTERVAL)
 
     async def _revalidate_files(
         self,
@@ -333,22 +333,27 @@ class FileCache:
             return
 
         # Check all file SHA256 hashes against server in parallel
-        async def check_file(file_state: FileState) -> tuple[FileState, bool]:
-            exists = await client.check_file_exists_by_hash(file_state.sha256)
+        # Filter guarantees sha256 is non-None; build typed list for mypy
+        files_with_hash: list[tuple[FileState, str]] = [
+            (f, f.sha256) for f in synced_files if f.sha256 is not None
+        ]
+
+        async def check_file(file_state: FileState, sha256: str) -> tuple[FileState, bool]:
+            exists = await client.check_file_exists_by_hash(sha256)
             return file_state, exists
 
-        results = await asyncio.gather(*[check_file(f) for f in synced_files if f.sha256])
-        stale_files = [fs for fs, exists in results if not exists]
+        results = await asyncio.gather(*[check_file(f, h) for f, h in files_with_hash])
+        stale_files = [(fs, h) for (fs, _exists), (_, h) in zip(results, files_with_hash) if not _exists]
 
         if stale_files:
             # Invalidate cache entries for stale files
-            for file_state in stale_files:
-                await client.cache.delete("file_by_hash", file_state.sha256)
+            for file_state, sha256 in stale_files:
+                await client.cache.delete("file_by_hash", sha256)
                 if file_state.uuid:
                     await client.cache.delete("file_exists_by_uuid", file_state.uuid)
 
             # Re-upload stale files
-            uploaded = await asyncio.gather(*[self._upload_file(client, f) for f in stale_files])
+            uploaded = await asyncio.gather(*[self._upload_file(client, f) for f, _ in stale_files])
 
             # Update directory_state_file entries with new UUIDs
             for file_state in uploaded:

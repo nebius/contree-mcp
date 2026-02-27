@@ -821,10 +821,9 @@ class TestRevalidation:
 
         # Open with new code (runs migration, adds updated_at via ALTER TABLE)
         async with FileCache(db_path=db_path) as cache:
-            async with cache.conn.execute(
-                "SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid",)
-            ) as cursor:
+            async with cache.conn.execute("SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid",)) as cursor:
                 row = await cursor.fetchone()
+                assert row is not None
 
             # Migrated row has NULL updated_at (ALTER TABLE DEFAULT only applies to new rows)
             needs = await cache._needs_revalidation(row["id"])
@@ -843,6 +842,7 @@ class TestRevalidation:
             "SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid-recent",)
         ) as cursor:
             row = await cursor.fetchone()
+            assert row is not None
 
         needs = await file_cache._needs_revalidation(row["id"])
         assert needs is False
@@ -864,6 +864,7 @@ class TestRevalidation:
             "SELECT id FROM directory_state WHERE uuid = ?", ("test-uuid-old",)
         ) as cursor:
             row = await cursor.fetchone()
+            assert row is not None
 
         needs = await file_cache._needs_revalidation(row["id"])
         assert needs is True
