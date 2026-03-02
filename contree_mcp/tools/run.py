@@ -33,6 +33,8 @@ async def run(
     USAGE:
     - Use list_images to find existing tags/UUIDs before import_image
     - Run shell commands with stdout/stderr capture
+    - files format: {"/path/in/container": "file-uuid-from-upload"} — key=destination, value=UUID
+    - One UUID can be injected into multiple paths
     - Chain commands using result_image from disposable=false
     - If you intend reuse, tag result_image using the convention:
       `{scope}/{purpose}/{base}` (base includes tag, e.g. python:3.11-slim)

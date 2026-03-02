@@ -95,7 +95,8 @@ async def download(
     - COST: Free (no VM)
 
     USAGE:
-    - destination: Absolute path for downloaded file (~ expansion supported)
+    - destination: Absolute path on MCP server's host filesystem, not inside the container (~ expansion supported)
+    - Parent directories are created automatically
     - Extract compiled binaries or build artifacts
     - Save configuration files for local editing
     - Retrieve logs or output files from completed runs

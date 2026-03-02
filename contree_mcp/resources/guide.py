@@ -173,7 +173,7 @@ REFERENCE_GUIDE = """
     | `list_images` | List images | `tag_prefix`, `tagged` | images[] | Free |
     | `get_image` | Get image details | `image` | uuid, tag | Free |
     | `set_tag` | Tag/untag image | `image_uuid`, `tag` | uuid, tag | Free |
-    | `upload` | Upload file | `content` or `path` | uuid | Free |
+    | `upload` | Upload file | `content`, `content_base64`, or local `path` | uuid | Free |
     | `download` | Download file | `image`, `path` | local file | Free |
     | `get_operation` | Poll operation | `operation_id` | state, stdout | Free |
     | `list_operations` | List operations | `status`, `kind` | operations[] | Free |

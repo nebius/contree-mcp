@@ -15,7 +15,7 @@ Upload a file to Contree.
 |-----------|------|----------|---------|-------------|
 | `content` | string | No* | - | Text content |
 | `content_base64` | string | No* | - | Base64-encoded binary |
-| `path` | string | No* | - | Local file path |
+| `path` | string | No* | - | Absolute path to a file on **local filesystem** to read and upload. Not a destination name — files are content-addressable (UUID). To name the file in a container, use `run`'s `files` parameter. |
 
 *One of `content`, `content_base64`, or `path` is required.
 
@@ -64,6 +64,18 @@ Pass the UUID to `run` via the `files` parameter:
 // Returns: {"uuid": "file-uuid-123"}
 
 // Step 2: Run
+{"tool": "run", "args": {
+  "command": "python /app/script.py",
+  "image": "img-uuid",
+  "files": {"/app/script.py": "file-uuid-123"}
+}}
+```
+
+## Common Mistake
+
+`path` reads from the **local MCP-server filesystem** — it does not set the file's name in storage. The uploaded file is content-addressable and identified only by UUID. To place it at a specific path inside a container, pass the UUID to `run`'s `files` parameter:
+
+```json
 {"tool": "run", "args": {
   "command": "python /app/script.py",
   "image": "img-uuid",
