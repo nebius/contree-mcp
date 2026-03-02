@@ -17,7 +17,9 @@ async def upload(
     - BINARY: Use content_base64 for binary files
 
     USAGE:
-    - Upload single file for injection into containers
+    - path: Absolute path on local MCP-server filesystem to read and upload (not a destination name)
+    - Files are content-addressable (no name, only UUID). Name the file when injecting
+      via run's files param: {"/container/path": "uuid"}
     - Pass returned UUID to run's tool via files parameter
     - Use rsync instead for multiple files or directories
 

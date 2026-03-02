@@ -14,7 +14,7 @@ Download a file from a container image to local filesystem.
 |-----------|------|----------|---------|-------------|
 | `image` | string | Yes | - | Image UUID or `tag:name` |
 | `path` | string | Yes | - | Path inside container |
-| `destination` | string | Yes | - | Local filesystem path |
+| `destination` | string | Yes | - | Absolute path on MCP host filesystem (`~` supported, parent dirs auto-created). This writes to the MCP server's filesystem, not inside the container. |
 | `executable` | boolean | No | `false` | Make file executable |
 
 ## Response
@@ -41,7 +41,7 @@ Download a file from a container image to local filesystem.
 {"tool": "download", "args": {
   "image": "img-build-result",
   "path": "/app/dist/binary",
-  "destination": "./binary",
+  "destination": "~/downloads/binary",
   "executable": true
 }}
 ```
@@ -52,9 +52,11 @@ Download a file from a container image to local filesystem.
 {"tool": "download", "args": {
   "image": "img-uuid",
   "path": "/var/log/app.log",
-  "destination": "./debug.log"
+  "destination": "~/downloads/debug.log"
 }}
 ```
+
+> **Note:** `destination` must be an absolute path on the MCP server's host filesystem (not inside the container). Use `~` for home directory. Parent directories are created automatically.
 
 ## See Also
 
