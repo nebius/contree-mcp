@@ -74,6 +74,30 @@ class TestCLI:
         assert result.returncode == 0
         assert "usage:" in result.stdout.lower() or "--help" in result.stdout
 
+    def test_cli_version_long(self) -> None:
+        """Test that --version prints version and exits 0."""
+        result = subprocess.run(
+            [sys.executable, "-m", "contree_mcp", "--version"],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.startswith("contree-mcp ")
+        assert result.stdout.strip() != "contree-mcp"
+        assert result.stdout.strip() != "contree-mcp unknown"
+
+    def test_cli_version_short(self) -> None:
+        """Test that -V is an alias for --version."""
+        result = subprocess.run(
+            [sys.executable, "-m", "contree_mcp", "-V"],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0
+        assert result.stdout.startswith("contree-mcp ")
+
     def test_cli_missing_required_token(self) -> None:
         """Test that missing required --token produces error."""
         # Clear env vars that could provide the token and config file
