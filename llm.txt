@@ -12,7 +12,7 @@ Contree MCP is a Model Context Protocol server providing isolated cloud containe
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     MCP Client (Claude)                     │
+│                         MCP Client                          │
 └────────────────────┬────────────────────────────────────────┘
                      │ Tool/Resource Calls
                      ▼
@@ -30,17 +30,25 @@ Contree MCP is a Model Context Protocol server providing isolated cloud containe
                      │
 ┌────────────────────▼────────────────────────────────────────┐
 │              Tool/Resource Functions                        │
-│  (tools/*.py, resources/*.py)                              │
-│  • Get CLIENT from context                                 │
-│  • Call ContreeClient methods                              │
+│  (tools/*.py, resources/*.py)                               │
+│  • Get CLIENT from context                                  │
+│  • Call ContreeClientAdapter methods                        │
+│  • Convert SDK models to stable tools/mcp_types.py DTOs     │
 └────────────────────┬────────────────────────────────────────┘
                      │
         ┌────────────▼────────────────┐
-        │    ContreeClient            │    ┌────────────┐
-        │ • HTTP requests to backend  │    │    Auth    │
-        │ • Caching responses         │◄───│  auth/*    │
-        │ • Operation polling         │    │RegistryAuth│
+        │     ContreeClientAdapter    │    ┌────────────┐
+        │ • SQLite response caching   │    │    Auth    │
+        │ • Lineage and tracking      │◄───│  auth/*    │
+        │ • Cancellation and shutdown │    │RegistryAuth│
         └────────────┬────────────────┘    └────────────┘
+                     │
+        ┌────────────▼────────────────┐
+        │ contree-client[httpx]       │
+        │ • Generated API operations  │
+        │ • HTTPX and SSE transport   │
+        │ • Response parsing          │
+        └────────────┬────────────────┘
                      │
         ┌────────────▼────────────────┐
         │ Contree Backend API         │
@@ -48,7 +56,7 @@ Contree MCP is a Model Context Protocol server providing isolated cloud containe
         └─────────────────────────────┘
 
 Parallel Services:
-├─ Cache (SQLite) - General purpose caching (credentials, images)
+├─ Cache (SQLite) - Backend responses, operations, and image lineage
 ├─ FileCache (SQLite) - File state tracking for rsync
 └─ ContextMiddleware - Request context preservation (HTTP mode)
 ```
@@ -129,7 +137,8 @@ FastMCP.add_tool(func) - Registers async functions as tools
     │
     └── async def tool_name(params) -> Response
             • Get CLIENT from context
-            • Call ContreeClient methods
+            • Call ContreeClientAdapter methods
+            • Convert SDK models to stable tools/mcp_types.py DTOs
             • Return Pydantic model or dict
 ```
 
@@ -242,19 +251,20 @@ For detailed documentation, use MCP resources:
 contree_mcp/
 ├── server.py            # MCP server setup
 ├── app.py               # FastMCP app with tools/resources
-├── client.py            # Contree API client
+├── client.py            # MCP adapter around the official contree-client SDK
 ├── cache.py             # SQLite cache (credentials, images)
 ├── file_cache.py        # SQLite file cache
 ├── auth/                # Registry authentication
 │   ├── __init__.py      # Exports RegistryAuth, RegistryToken
 │   └── registry.py      # OCI token discovery and validation
 ├── tools/               # Tool implementations
+│   ├── mcp_types.py     # Stable MCP-facing Pydantic DTOs
 │   ├── import_image.py  # Requires auth or anonymous flag
 │   ├── registry_auth.py # Validate and store credentials
 │   └── registry_token_obtain.py  # Open browser for PAT
 └── resources/           # Resource implementations
-    ├── static.py        # StaticResource for guides
-    └── guide.py         # Guide content (SECTIONS dict)
+    ├── static.py        # Static MCP resources
+    └── guide/           # Guide sections and resource registration
 ```
 
 ---

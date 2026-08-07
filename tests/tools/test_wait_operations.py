@@ -1,54 +1,31 @@
-import pytest
+import asyncio
 
-from contree_mcp.backend_types import (
-    ConsumedResources,
-    InstanceResult,
-    OperationKind,
-    OperationResult,
-    OperationStatus,
-    ProcessExitState,
-    Stream,
-)
+import pytest
+from contree_client import ContreeError
+from contree_client.models import OperationResponse as SDKOperationResponse
+from contree_client.models import OperationStatus as SDKOperationStatus
+from contree_client.testing import ContreeAsyncClient
+
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import OperationStatus
 from contree_mcp.tools.wait_operations import WaitOperationsOutput, wait_operations
-from tests.conftest import (
-    FakeResponse,
-    FakeResponses,
-    FakeResponseSequence,
-    make_completion_event,
-    make_sse_event,
-)
 
 from . import TestCase
+from .sdk_factories import instance_operation
 
 
-class TestWaitOperationsFromAPI(TestCase):
-    """Test wait_operations fetching from API."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-test",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "test",
-                        "image": "img-1",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="hello", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=0.5),
-                        ),
-                    },
-                    "result": OperationResult(image="img-result", tag=None),
-                }
+class TestWaitOperationsFromAdapter(TestCase):
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            instance_operation(
+                uuid="op-test",
+                stdout="hello",
+                elapsed_time=0.5,
+                result_image="img-result",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_wait_single_operation(self) -> None:
@@ -59,106 +36,77 @@ class TestWaitOperationsFromAPI(TestCase):
 
     @pytest.mark.asyncio
     async def test_wait_multiple_operations(self) -> None:
-        """Test waiting for multiple operations."""
         result = await wait_operations(operation_ids=["op-1", "op-2", "op-3"])
         assert isinstance(result, WaitOperationsOutput)
-        assert len(result.completed) == 3
         assert set(result.completed) == {"op-1", "op-2", "op-3"}
         assert result.cancelled == []
         assert result.timed_out is False
 
     @pytest.mark.asyncio
     async def test_wait_mode_any(self) -> None:
-        """Test mode='any' returns on first completion."""
         result = await wait_operations(
             operation_ids=["op-any-1", "op-any-2"],
             mode="any",
         )
         assert result.timed_out is False
-        assert len(result.completed) >= 1
+        assert result.completed
 
 
 class TestWaitOperationsFailedOps(TestCase):
-    """Test wait_operations with failed operations."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-fail-wait",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.FAILED.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": "Exit code 1",
-                    "metadata": None,
-                    "result": None,
-                }
+    @pytest.fixture(autouse=True)
+    def mock_failed_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            SDKOperationResponse(
+                uuid="op-fail-wait",
+                kind="instance",
+                status=SDKOperationStatus.FAILED,
+                error="Exit code 1",
+                created_at="2024-01-01T00:00:00Z",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_wait_failed_operation(self) -> None:
-        """Test waiting for a failed operation."""
         result = await wait_operations(operation_ids=["op-fail-wait"])
         assert "op-fail-wait" in result.completed
         op_result = result.results["op-fail-wait"]
-        assert op_result.status == OperationStatus.FAILED
+        assert op_result.status is OperationStatus.FAILED
         assert op_result.error == "Exit code 1"
 
 
 class TestWaitOperationsCancelled(TestCase):
-    """Test wait_operations with cancelled operations."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-cancelled",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.CANCELLED.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": "User cancelled",
-                    "metadata": None,
-                    "result": None,
-                }
+    @pytest.fixture(autouse=True)
+    def mock_cancelled_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            SDKOperationResponse(
+                uuid="op-cancelled",
+                kind="instance",
+                status=SDKOperationStatus.CANCELLED,
+                error="User cancelled",
+                created_at="2024-01-01T00:00:00Z",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_wait_cancelled_operation(self) -> None:
-        """Test waiting for a cancelled operation."""
         result = await wait_operations(operation_ids=["op-cancelled"])
         assert "op-cancelled" in result.completed
-        assert result.results["op-cancelled"].status == OperationStatus.CANCELLED
+        assert result.results["op-cancelled"].status is OperationStatus.CANCELLED
 
 
 class TestWaitTrackedOperations(TestCase):
-    """Test wait_operations with tracked operations."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": OperationResult(image="img-tracked", tag=None),
-                }
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_tracked_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(uuid="op-tracked", result_image="img-tracked"),
+        )
 
     @pytest.mark.asyncio
     async def test_wait_tracked_operation(self) -> None:
-        """Test waiting for a tracked operation."""
         client = CLIENT.get()
-
-        # Track an operation - the client will poll the API which returns SUCCESS
-        # Note: tracking is now done via _track_operation (internal method)
         client._track_operation("op-tracked-1", kind="instance")
         assert client.is_tracked("op-tracked-1")
 
@@ -168,11 +116,7 @@ class TestWaitTrackedOperations(TestCase):
 
     @pytest.mark.asyncio
     async def test_wait_tracked_operation_mode_any(self) -> None:
-        """Test mode='any' with tracked operations returns early."""
         client = CLIENT.get()
-
-        # Track two operations - both will complete via API (returns SUCCESS)
-        # Note: tracking is now done via _track_operation (internal method)
         client._track_operation("op-any-tracked-1", kind="instance")
         client._track_operation("op-any-tracked-2", kind="instance")
 
@@ -181,33 +125,20 @@ class TestWaitTrackedOperations(TestCase):
             mode="any",
             timeout=5.0,
         )
-        # Should return when any completes (both will complete due to API returning SUCCESS)
-        assert len(result.completed) >= 1
+        assert result.completed
         assert result.timed_out is False
 
 
-class TestWaitUntrackedPolling(TestCase):
-    """Test wait_operations polling for untracked operations."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        # First call returns EXECUTING, second returns SUCCESS
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": OperationResult(image="img-polled", tag=None),
-                }
-            ),
-        }
+class TestWaitUntrackedOperations(TestCase):
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            instance_operation(uuid="op-untracked", result_image="img-polled"),
+        )
 
     @pytest.mark.asyncio
-    async def test_wait_untracked_polling(self) -> None:
-        """Test polling for untracked operations."""
+    async def test_wait_untracked_operation(self) -> None:
         result = await wait_operations(
             operation_ids=["op-untracked-poll"],
             timeout=5.0,
@@ -217,224 +148,141 @@ class TestWaitUntrackedPolling(TestCase):
 
     @pytest.mark.asyncio
     async def test_wait_untracked_mode_any(self) -> None:
-        """Test mode='any' breaks early for untracked operations."""
         result = await wait_operations(
             operation_ids=["op-untracked-any-1", "op-untracked-any-2"],
             mode="any",
             timeout=5.0,
         )
-        # Should return as soon as any completes
-        assert len(result.completed) >= 1
+        assert result.completed
         assert result.timed_out is False
 
 
-class TestWaitOperationsPollingSuccess(TestCase):
-    """Test wait_operations when operation completes successfully."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": OperationResult(image="img-success", tag=None),
-                }
-            ),
-        }
+class TestWaitOperationsSuccess(TestCase):
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            instance_operation(uuid="op-success", result_image="img-success"),
+        )
 
     @pytest.mark.asyncio
     async def test_wait_operation_success(self) -> None:
-        """Test waiting for operation that completes successfully."""
-        result = await wait_operations(
-            operation_ids=["op-success"],
-            timeout=5.0,
-        )
+        result = await wait_operations(operation_ids=["op-success"], timeout=5.0)
         assert "op-success" in result.completed
 
 
-class TestWaitOperationsPollingError(TestCase):
-    """Test wait_operations when polling raises an exception."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        from http import HTTPStatus
-
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
-                body={"error": "Server error"},
-            ),
-        }
+class TestWaitOperationsError(TestCase):
+    @pytest.fixture(autouse=True)
+    def mock_operation_error(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            error=ContreeError("Server error"),
+        )
 
     @pytest.mark.asyncio
-    async def test_wait_polling_exception(self) -> None:
-        """Test that polling exceptions are handled gracefully."""
-        result = await wait_operations(
-            operation_ids=["op-error-poll"],
-            timeout=1.0,
-        )
-        # Operation should be marked as failed due to exception
-        assert "op-error-poll" in result.completed
-        assert result.results["op-error-poll"].status == OperationStatus.FAILED
-        assert "Server error" in str(result.results["op-error-poll"].error)
+    async def test_wait_exception(self) -> None:
+        result = await wait_operations(operation_ids=["op-error"], timeout=1.0)
+        assert "op-error" in result.completed
+        assert result.results["op-error"].status is OperationStatus.FAILED
+        assert "Server error" in str(result.results["op-error"].error)
 
 
 class TestWaitOperationsTimeout(TestCase):
-    """Test wait_operations timeout scenarios."""
+    @pytest.fixture(autouse=True)
+    def mock_slow_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        active = instance_operation(
+            uuid="op-timeout",
+            status=SDKOperationStatus.EXECUTING,
+        )
+        sdk_client_testing.mock("get_operation_status", active)
+        sdk_client_testing.mock("cancel_operation")
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-timeout",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.EXECUTING.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-            "DELETE /operations/{uuid}": FakeResponse(body={"uuid": "op-timeout", "status": "CANCELLED"}),
-        }
+        async def never_finishes(operation_id: str) -> SDKOperationResponse:
+            await asyncio.Event().wait()
+            raise AssertionError(f"operation unexpectedly completed: {operation_id}")
+
+        sdk_client_testing.wait_operation = never_finishes  # type: ignore[method-assign]
 
     @pytest.mark.asyncio
     async def test_wait_timeout_untracked(self) -> None:
-        """Test timeout for untracked operations that never complete."""
         result = await wait_operations(
             operation_ids=["op-never-completes"],
-            timeout=0.2,
+            timeout=0.02,
         )
-        # Timeout triggers ContreeError which is caught and marked as failed
-        # with the timeout message in error
         assert "op-never-completes" in result.completed
         op_result = result.results["op-never-completes"]
-        assert op_result.status == OperationStatus.FAILED
+        assert op_result.status is OperationStatus.FAILED
         assert "timed out" in str(op_result.error)
 
     @pytest.mark.asyncio
     async def test_wait_timeout_mode_any(self) -> None:
-        """Test timeout with mode='any' when nothing completes."""
         result = await wait_operations(
             operation_ids=["op-timeout-any"],
             mode="any",
-            timeout=0.2,
+            timeout=0.02,
         )
-        # All operations timed out and are marked as failed
-        assert len(result.completed) >= 1 or result.timed_out
+        assert result.completed or result.timed_out
 
 
 class TestWaitModeAnyCancellation(TestCase):
-    """Test that mode='any' explicitly cancels remaining backend operations."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            # op-fast completes immediately
-            "GET /operations/op-fast": FakeResponse(
-                body={
-                    "uuid": "op-fast",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": OperationResult(image="img-fast", tag=None),
-                }
-            ),
-            # op-slow stays EXECUTING (never completes on its own)
-            "GET /operations/op-slow": FakeResponse(
-                body={
-                    "uuid": "op-slow",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.EXECUTING.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-            # DELETE handler for cancel_operation
-            "DELETE /operations/{uuid}": FakeResponse(
-                body={"uuid": "op-slow", "status": "CANCELLED"},
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_mode_any_cancels_remaining_operations(self) -> None:
-        """Test that mode='any' cancels backend operations not in results."""
-        from unittest.mock import patch
-
-        client = CLIENT.get()
-        original_cancel = client.cancel_operation
-
-        cancel_calls: list[str] = []
-
-        async def tracking_cancel(op_id: str) -> OperationStatus:
-            cancel_calls.append(op_id)
-            return await original_cancel(op_id)
-
-        with patch.object(client, "cancel_operation", side_effect=tracking_cancel):
-            result = await wait_operations(
-                operation_ids=["op-fast", "op-slow"],
-                mode="any",
-                timeout=5.0,
+    @pytest.fixture(autouse=True)
+    def mock_operations(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        async def get_operation_status(operation_id: str) -> SDKOperationResponse:
+            if operation_id == "op-fast":
+                return instance_operation(uuid=operation_id, result_image="img-fast")
+            return instance_operation(
+                uuid=operation_id,
+                status=SDKOperationStatus.EXECUTING,
             )
 
-        # op-fast should have completed
+        async def wait_operation(operation_id: str) -> SDKOperationResponse:
+            await asyncio.Event().wait()
+            raise AssertionError(f"operation unexpectedly completed: {operation_id}")
+
+        sdk_client_testing.get_operation_status = get_operation_status  # type: ignore[method-assign]
+        sdk_client_testing.wait_operation = wait_operation  # type: ignore[method-assign]
+        sdk_client_testing.mock("cancel_operation")
+
+    @pytest.mark.asyncio
+    async def test_mode_any_cancels_remaining_operations(
+        self,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        result = await wait_operations(
+            operation_ids=["op-fast", "op-slow"],
+            mode="any",
+            timeout=5.0,
+        )
+
         assert "op-fast" in result.completed
-        assert result.results["op-fast"].status == OperationStatus.SUCCESS
-
-        # op-slow should be in cancelled list
+        assert result.results["op-fast"].status is OperationStatus.SUCCESS
         assert "op-slow" in result.cancelled
-
-        # cancel_operation should have been called for op-slow
-        assert "op-slow" in cancel_calls
-
+        assert sdk_client_testing.calls_for("cancel_operation")[0].args == ("op-slow",)
         assert result.timed_out is False
 
 
 class TestWaitMixedOperations(TestCase):
-    """Test wait_operations with multiple operations."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": None,
-                    "result": OperationResult(image="img-api", tag=None),
-                }
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operations(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            instance_operation(uuid="op-api", result_image="img-api"),
+        )
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(uuid="op-tracked", result_image="img-tracked"),
+        )
 
     @pytest.mark.asyncio
     async def test_wait_multiple_operations(self) -> None:
-        """Test waiting for multiple operations."""
-        result = await wait_operations(
-            operation_ids=["op-1", "op-2"],
-            timeout=5.0,
-        )
+        result = await wait_operations(operation_ids=["op-1", "op-2"], timeout=5.0)
         assert set(result.completed) == {"op-1", "op-2"}
         assert result.cancelled == []
         assert result.timed_out is False
 
     @pytest.mark.asyncio
     async def test_wait_mixed_tracked_and_untracked(self) -> None:
-        """Test waiting for mix of tracked and untracked operations."""
         client = CLIENT.get()
-
-        # Track one operation - the client will poll the API which returns SUCCESS
-        # Note: tracking is now done via _track_operation (internal method)
         client._track_operation("op-mixed-tracked", kind="instance")
 
         result = await wait_operations(
@@ -444,96 +292,3 @@ class TestWaitMixedOperations(TestCase):
         assert "op-mixed-tracked" in result.completed
         assert "op-mixed-untracked" in result.completed
         assert result.timed_out is False
-
-
-class TestWaitOperationsViaSSE(TestCase):
-    """Completion delivered through the SSE events stream."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponse(sse_events=[make_completion_event(1)]),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(
-                    body={
-                        "kind": OperationKind.INSTANCE.value,
-                        "status": OperationStatus.EXECUTING.value,
-                        "created_at": "2024-01-01T00:00:00Z",
-                        "error": None,
-                        "metadata": None,
-                        "result": None,
-                    }
-                ),
-                FakeResponse(
-                    body={
-                        "kind": OperationKind.INSTANCE.value,
-                        "status": OperationStatus.SUCCESS.value,
-                        "created_at": "2024-01-01T00:00:00Z",
-                        "error": None,
-                        "metadata": None,
-                        "result": {"image": "img-sse", "tag": None},
-                    }
-                ),
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_wait_via_events_stream(self) -> None:
-        result = await wait_operations(operation_ids=["op-sse-wait"], timeout=10.0)
-        assert "op-sse-wait" in result.completed
-        assert result.results["op-sse-wait"].status == OperationStatus.SUCCESS
-        assert result.timed_out is False
-
-
-class TestWaitOperationsSSEDisconnect(TestCase):
-    """Mid-stream disconnect — Last-Event-Id resume delivers completion."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponseSequence(
-                # First connection drops before completion
-                FakeResponse(sse_events=[make_sse_event(1, "stdout", {"value": "x", "encoding": "ascii"}, spid=1)]),
-                # Reconnect delivers the terminal event
-                FakeResponse(sse_events=[make_completion_event(2)]),
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(
-                    body={
-                        "kind": OperationKind.INSTANCE.value,
-                        "status": OperationStatus.EXECUTING.value,
-                        "created_at": "2024-01-01T00:00:00Z",
-                        "error": None,
-                        "metadata": None,
-                        "result": None,
-                    }
-                ),
-                FakeResponse(
-                    body={
-                        "kind": OperationKind.INSTANCE.value,
-                        "status": OperationStatus.EXECUTING.value,
-                        "created_at": "2024-01-01T00:00:00Z",
-                        "error": None,
-                        "metadata": None,
-                        "result": None,
-                    }
-                ),
-                FakeResponse(
-                    body={
-                        "kind": OperationKind.INSTANCE.value,
-                        "status": OperationStatus.SUCCESS.value,
-                        "created_at": "2024-01-01T00:00:00Z",
-                        "error": None,
-                        "metadata": None,
-                        "result": {"image": "img-resumed", "tag": None},
-                    }
-                ),
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_disconnect_then_resume(self) -> None:
-        result = await wait_operations(operation_ids=["op-sse-resume"], timeout=10.0)
-        assert "op-sse-resume" in result.completed
-        assert result.results["op-sse-resume"].status == OperationStatus.SUCCESS
-        assert result.results["op-sse-resume"].result.image == "img-resumed"

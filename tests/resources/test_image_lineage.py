@@ -13,7 +13,7 @@ class TestImageLineageUnknown(TestCase):
     """Tests for image_lineage resource - unknown image."""
 
     @pytest.mark.asyncio
-    async def test_lineage_unknown_image(self, contree_client) -> None:
+    async def test_lineage_unknown_image(self) -> None:
         """Test lineage for unknown image returns empty data."""
         result = await image_lineage(image="unknown-image")
         data = json.loads(result)
@@ -32,9 +32,9 @@ class TestImageLineageRoot(TestCase):
     """Tests for image_lineage resource - root image."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         await cache.put(
             kind="image",
             key="img-root",
@@ -62,9 +62,9 @@ class TestImageLineageWithParent(TestCase):
     """Tests for image_lineage resource - with parent."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         parent = await cache.put(
             kind="image",
             key="img-parent",
@@ -97,9 +97,9 @@ class TestImageLineageWithChildren(TestCase):
     """Tests for image_lineage resource - with children."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         parent = await cache.put(
             kind="image",
             key="img-parent",
@@ -133,9 +133,9 @@ class TestImageLineageDeepChain(TestCase):
     """Tests for image_lineage resource - deep chain."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         root = await cache.put(
             kind="image",
             key="img-root",
@@ -177,9 +177,9 @@ class TestImageLineageJsonFormat(TestCase):
     """Tests for image_lineage resource - JSON format."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         await cache.put(
             kind="image",
             key="img-test",

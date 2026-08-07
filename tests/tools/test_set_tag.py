@@ -1,30 +1,28 @@
 """Tests for set_tag tool."""
 
-from http import HTTPStatus
-
 import pytest
+from contree_client import NotFoundError
+from contree_client.models import Image as SDKImage
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import Image
+from contree_mcp.tools.mcp_types import Image
 from contree_mcp.tools.set_tag import set_tag
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
 
 class TestSetTagHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "PATCH /images/{uuid}/tag": FakeResponse(
-                body=Image(uuid="img-1", tag="myapp:v1", created_at="2024-01-01T00:00:00Z")
+    @pytest.fixture(autouse=True)
+    def mock_tag(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "update_image_tag",
+            SDKImage(
+                uuid="img-1",
+                tag="myapp:v1",
+                created_at="2024-01-01T00:00:00Z",
+                operation_uuid=None,
             ),
-            "DELETE /images/{uuid}/tag": FakeResponse(
-                body=Image(uuid="img-1", tag=None, created_at="2024-01-01T00:00:00Z")
-            ),
-            "GET /inspect/{uuid}/": FakeResponse(
-                body=Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z")
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_set_tag(self) -> None:
@@ -39,14 +37,18 @@ class TestSetTagHappyPath(TestCase):
 
 
 class TestSetTagRemove(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "DELETE /images/{uuid}/tag": FakeResponse(body={}),
-            "GET /inspect/{uuid}/": FakeResponse(
-                body=Image(uuid="img-1", tag=None, created_at="2024-01-01T00:00:00Z")
+    @pytest.fixture(autouse=True)
+    def mock_untag(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("delete_image_tag")
+        sdk_client_testing.mock(
+            "inspect_image",
+            SDKImage(
+                uuid="img-1",
+                tag=None,
+                created_at="2024-01-01T00:00:00Z",
+                operation_uuid=None,
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_remove_tag(self) -> None:
@@ -56,14 +58,11 @@ class TestSetTagRemove(TestCase):
 
 
 class TestSetTagErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "PATCH /images/{uuid}/tag": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "Image not found"},
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_missing_image(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "update_image_tag", error=NotFoundError(404, "Image not found")
+        )
 
     @pytest.mark.asyncio
     async def test_image_not_found(self) -> None:

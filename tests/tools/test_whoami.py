@@ -3,11 +3,12 @@
 import sys
 
 import pytest
+from contree_client.models import WhoAmIResponse as SDKWhoAmIResponse
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import WhoAmIResponse
+from contree_mcp.tools.mcp_types import WhoAmIResponse
 from contree_mcp.tools.whoami import MCPUpgradeHint, WhoAmIOutput, whoami
 from contree_mcp.update_check import UpdateChecker, UpdateState
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
@@ -32,19 +33,18 @@ def make_checker(current_version: str, latest_version: str = "") -> UpdateChecke
 
 
 class TestWhoAmIHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /whoami": FakeResponse(
-                body=WhoAmIResponse(
-                    token_uuid="a1b2c3d4",
-                    token_expiration=1735689600,
-                    permissions={"import": True, "spawn": True, "cancel": False},
-                    limits={"instance_max_timeout": 3600, "instance_max_concurrency": 10},
-                    operations_stat={"completed": 0},
-                ),
+    @pytest.fixture(autouse=True)
+    def mock_whoami(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "whoami",
+            SDKWhoAmIResponse(
+                token_uuid="a1b2c3d4",
+                token_expiration=1735689600,
+                permissions={"import": True, "spawn": True, "cancel": False},
+                limits={"instance_max_timeout": 3600, "instance_max_concurrency": 10},
+                operations_stat={"completed": 0},
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_returns_full_payload(self) -> None:
@@ -68,13 +68,18 @@ class TestWhoAmIUpgradeHint(TestCase):
     reading the shared ``update_checker`` singleton's in-memory state.
     """
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /whoami": FakeResponse(
-                body=WhoAmIResponse(token_uuid="t-1"),
+    @pytest.fixture(autouse=True)
+    def mock_whoami(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "whoami",
+            SDKWhoAmIResponse(
+                token_uuid="t-1",
+                token_expiration=None,
+                permissions={},
+                limits={},
+                operations_stat={},
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_returns_hint_when_outdated(
@@ -153,19 +158,18 @@ class TestWhoAmIUpgradeHint(TestCase):
 class TestWhoAmINullableExpiration(TestCase):
     """Token without an expiry returns null — must not break parsing."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /whoami": FakeResponse(
-                body={
-                    "token_uuid": "perpetual",
-                    "token_expiration": None,
-                    "permissions": {},
-                    "limits": {},
-                    "operations_stat": {},
-                }
+    @pytest.fixture(autouse=True)
+    def mock_whoami(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "whoami",
+            SDKWhoAmIResponse(
+                token_uuid="perpetual",
+                token_expiration=None,
+                permissions={},
+                limits={},
+                operations_stat={},
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_nullable_expiration(self) -> None:

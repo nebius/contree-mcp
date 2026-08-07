@@ -10,7 +10,7 @@ from starlette.responses import HTMLResponse
 from contree_mcp.app import create_mcp_app
 from contree_mcp.arguments import Parser, ServerMode
 from contree_mcp.cache import Cache
-from contree_mcp.client import ContreeClient
+from contree_mcp.client import ContreeClientAdapter
 from contree_mcp.config import AuthType, Config
 from contree_mcp.context import CLIENT, FILES_CACHE, ContextMiddleware
 from contree_mcp.docs import generate_docs_html
@@ -42,14 +42,10 @@ async def amain(parser: Parser) -> None:
         )
     if not profile.url:
         raise SystemExit(
-            "No API URL configured. Set CONTREE_URL, pass --url, or set one "
-            "in $XDG_CONFIG_HOME/contree/auth.ini."
+            "No API URL configured. Set CONTREE_URL, pass --url, or set one in $XDG_CONFIG_HOME/contree/auth.ini."
         )
     if profile.auth_type == AuthType.IAM and not profile.project:
-        raise SystemExit(
-            "IAM auth requires a project ID. Set CONTREE_PROJECT, pass "
-            "--project, or run `contree auth`."
-        )
+        raise SystemExit("IAM auth requires a project ID. Set CONTREE_PROJECT, pass --project, or run `contree auth`.")
 
     # Name == ``"env"`` is the synthetic profile ``Config.resolve()``
     # returns when an external token source bypasses the file (see
@@ -75,7 +71,7 @@ async def amain(parser: Parser) -> None:
             )
         )
         client = await stack.enter_async_context(
-            ContreeClient.from_profile(profile, cache=general_cache),
+            ContreeClientAdapter.from_profile(profile, cache=general_cache),
         )
 
         CLIENT.set(client)

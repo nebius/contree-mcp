@@ -42,7 +42,8 @@ When making changes:
 ## Pull request expectations
 
 - Keep PRs focused — one logical change per PR.
-- Include tests for new behavior; existing test patterns in `tests/` use `FakeResponses` for HTTP mocking.
+- Include tests for new behavior; use `contree_client.testing.ContreeAsyncClient` to mock the SDK boundary. Reserve
+  raw HTTP fakes for transport behavior that the SDK test double cannot represent.
 - Update docs in the same PR as the code change.
 - The CI suite (`tests.yml`) must pass.
 - The PR template (auto-applied) lists the merge checklist.
@@ -53,9 +54,10 @@ Commit messages: short imperative subject (≤72 chars), optional body explainin
 
 - `contree_mcp/app.py` — registers tools, prompts, resources with FastMCP
 - `contree_mcp/tools/` — one file per MCP tool
-- `contree_mcp/client.py` — async HTTP client for the ConTree API
+- `contree_mcp/tools/mcp_types.py` — stable MCP-facing Pydantic DTOs
+- `contree_mcp/client.py` — MCP adapter around the official `contree-client` SDK
 - `contree_mcp/resources/` — MCP resource handlers (image inspection, guides)
-- `tests/conftest.py` — fixtures (`contree_client`, `http_fake_server`, `FakeResponses`)
+- `tests/conftest.py` — shared SDK test-client, MCP adapter, and cache fixtures
 - `llm.txt` — agent-readable internals reference
 
 ## Code style

@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import Image
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import Image
 
 
 class ListImagesOutput(BaseModel):
@@ -47,4 +47,4 @@ async def list_images(
         since=since,
         until=until,
     )
-    return ListImagesOutput(images=[Image(uuid=img.uuid, tag=img.tag, created_at=img.created_at) for img in images])
+    return ListImagesOutput(images=[Image.model_validate(img.to_dict()) for img in images])

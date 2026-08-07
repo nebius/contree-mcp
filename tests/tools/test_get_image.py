@@ -1,25 +1,27 @@
-from http import HTTPStatus
-
 import pytest
+from contree_client import NotFoundError
+from contree_client.models import Image as SDKImage
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import Image
 from contree_mcp.tools.get_image import get_image
-from tests.conftest import FakeResponse, FakeResponses
+from contree_mcp.tools.mcp_types import Image
 
 from . import TestCase
 
 
 class TestGetImageHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/": FakeResponse(
-                body=Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z")
+    @pytest.fixture(autouse=True)
+    def mock_image(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_find_image_by_tag", "img-1")
+        sdk_client_testing.mock(
+            "inspect_image",
+            SDKImage(
+                uuid="img-1",
+                tag="python:3.11",
+                created_at="2024-01-01T00:00:00Z",
+                operation_uuid=None,
             ),
-            "GET /inspect/{uuid}/": FakeResponse(
-                body=Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z")
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_get_by_uuid(self) -> None:
@@ -43,14 +45,9 @@ class TestGetImageHappyPath(TestCase):
 
 
 class TestGetImageErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/{uuid}/": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "Image not found"},
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_missing_image(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_image", error=NotFoundError(404, "Image not found"))
 
     @pytest.mark.asyncio
     async def test_image_not_found(self) -> None:

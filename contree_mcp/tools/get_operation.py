@@ -1,5 +1,5 @@
-from contree_mcp.backend_types import OperationResponse
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import OperationResponse
 
 
 async def get_operation(operation_id: str) -> OperationResponse:
@@ -23,4 +23,5 @@ async def get_operation(operation_id: str) -> OperationResponse:
     """
 
     client = CLIENT.get()
-    return await client.get_operation(operation_id)
+    result = await client.get_operation(operation_id)
+    return OperationResponse.model_validate(result.to_dict())

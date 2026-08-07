@@ -1,6 +1,6 @@
 from contree_mcp.auth import RegistryAuth, RegistryToken
-from contree_mcp.backend_types import OperationResponse
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import OperationResponse
 
 
 class RegistryAuthenticationError(Exception):
@@ -94,6 +94,7 @@ async def import_image(
 
     if wait:
         # Client handles lineage caching automatically via _cache_lineage
-        return await client.wait_for_operation(operation_id)
+        result = await client.wait_for_operation(operation_id)
+        return OperationResponse.model_validate(result.to_dict())
 
     return {"operation_id": operation_id}

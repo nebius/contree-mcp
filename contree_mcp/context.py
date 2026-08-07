@@ -8,7 +8,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 from starlette.types import ASGIApp
 
-from contree_mcp.client import ContreeClient
+from contree_mcp.client import ContreeClientAdapter
 from contree_mcp.file_cache import FileCache
 
 T = TypeVar("T")
@@ -33,7 +33,7 @@ class StrictContextVar(Generic[T]):
 
 
 # Context variables for server dependencies
-CLIENT: StrictContextVar[ContreeClient] = StrictContextVar("CLIENT")
+CLIENT: StrictContextVar[ContreeClientAdapter] = StrictContextVar("CLIENT")
 FILES_CACHE: StrictContextVar[FileCache] = StrictContextVar("FILES_CACHE")
 
 

@@ -2,20 +2,24 @@ import base64
 from pathlib import Path
 
 import pytest
+from contree_client import NotFoundError
+from contree_client.models import FileResponse as SDKFileResponse
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import FileResponse
+from contree_mcp.tools.mcp_types import FileResponse
 from contree_mcp.tools.upload import upload
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
 
 class TestUploadHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-123", sha256="abc123def456")),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_upload(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "File not found"))
+        sdk_client_testing.mock(
+            "upload_file",
+            SDKFileResponse(uuid="file-123", sha256="abc123def456", size=-1),
+        )
 
     @pytest.mark.asyncio
     async def test_upload_from_path(self, tmp_path: Path) -> None:

@@ -1,5 +1,5 @@
-from contree_mcp.backend_types import Image
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import Image
 
 
 async def set_tag(image_uuid: str, tag: str | None = None) -> Image:
@@ -28,4 +28,4 @@ async def set_tag(image_uuid: str, tag: str | None = None) -> Image:
         img = await client.tag_image(image_uuid=image_uuid, tag=tag)
     else:
         img = await client.untag_image(image_uuid=image_uuid)
-    return Image(uuid=img.uuid, tag=img.tag, created_at=img.created_at)
+    return Image.model_validate(img.to_dict())

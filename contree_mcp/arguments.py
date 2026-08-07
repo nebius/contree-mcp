@@ -104,10 +104,7 @@ class Parser(argclass.Parser):
     project: str | None = argclass.Argument(
         default=None,
         env_var="CONTREE_PROJECT",
-        help=(
-            "Nebius project ID. Presence selects IAM auth; absence means JWT. "
-            "Also read from NEBIUS_AI_PROJECT."
-        ),
+        help=("Nebius project ID. Presence selects IAM auth; absence means JWT. Also read from NEBIUS_AI_PROJECT."),
     )
     mode: ServerMode = argclass.EnumArgument(
         ServerMode, default=ServerMode.STDIO, lowercase=True, help="Server transport mode"

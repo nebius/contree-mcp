@@ -205,21 +205,17 @@ class Config(MutableMapping[str, ConfigProfile]):
                 "or rely on the active auth.ini profile."
             )
         elif nebius_project and not nebius_token:
-            log.info(
-                "Ignoring NEBIUS_AI_PROJECT: NEBIUS_API_KEY is not set."
-            )
+            log.info("Ignoring NEBIUS_AI_PROJECT: NEBIUS_API_KEY is not set.")
 
         # Similarly warn on partial CONTREE_* without a profile to back
         # the missing fields — saves users a long stare at "no token".
         if env_token and not env_project and not project:
             log.debug(
-                "CONTREE_TOKEN set without CONTREE_PROJECT; project will "
-                "come from the active profile (if any).",
+                "CONTREE_TOKEN set without CONTREE_PROJECT; project will come from the active profile (if any).",
             )
         if env_project and not env_token and not token:
             log.debug(
-                "CONTREE_PROJECT set without CONTREE_TOKEN; token will "
-                "come from the active profile (if any).",
+                "CONTREE_PROJECT set without CONTREE_TOKEN; token will come from the active profile (if any).",
             )
 
         # Identify the active profile.

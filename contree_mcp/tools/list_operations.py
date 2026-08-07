@@ -1,7 +1,8 @@
+from contree_client.models import OperationStatus as SDKOperationStatus
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import OperationKind, OperationStatus, OperationSummary
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import OperationKind, OperationStatus, OperationSummary
 
 
 class ListOperationsOutput(BaseModel):
@@ -39,9 +40,11 @@ async def list_operations(
 
     operations = await client.list_operations(
         limit=limit,
-        status=status,
-        kind=type,
+        status=SDKOperationStatus(status.value) if status else None,
+        kind=type.value if type else None,
         since=since,
     )
 
-    return ListOperationsOutput(operations=operations)
+    return ListOperationsOutput(
+        operations=[OperationSummary.model_validate(operation.to_dict()) for operation in operations]
+    )

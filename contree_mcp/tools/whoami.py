@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import WhoAmIResponse
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import WhoAmIResponse
 from contree_mcp.update_check import update_checker
 
 
@@ -72,7 +72,7 @@ async def whoami() -> WhoAmIOutput:
         )
 
     return WhoAmIOutput(
-        **response.model_dump(),
+        **response.to_dict(),
         mcp_version=update_checker.current_version,
         mcp_upgrade=upgrade,
     )

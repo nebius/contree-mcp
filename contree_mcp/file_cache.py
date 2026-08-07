@@ -10,7 +10,7 @@ from pathlib import Path
 
 import aiosqlite
 
-from contree_mcp.client import ContreeClient
+from contree_mcp.client import ContreeClientAdapter
 
 
 @dataclass(frozen=True)
@@ -191,7 +191,7 @@ class FileCache:
                 return set()
             return {FileState.from_row(row) for row in rows}
 
-    async def _upload_file(self, client: ContreeClient, file_state: FileState) -> FileState:
+    async def _upload_file(self, client: ContreeClientAdapter, file_state: FileState) -> FileState:
         async with self.__upload_semaphore:
             output = await client.upload_file(file_state.path.open("rb"))
         path_str = str(file_state.path)
@@ -227,7 +227,7 @@ class FileCache:
 
     async def _update_synced_directory(
         self,
-        client: ContreeClient,
+        client: ContreeClientAdapter,
         directory_state: int,
         local_files: set[FileState],
         synced_files: set[FileState],
@@ -264,7 +264,7 @@ class FileCache:
 
     async def _sync_new_directory(
         self,
-        client: ContreeClient,
+        client: ContreeClientAdapter,
         local_files: set[FileState],
         path_uuid: str,
         root: Path,
@@ -317,7 +317,7 @@ class FileCache:
 
     async def _revalidate_files(
         self,
-        client: ContreeClient,
+        client: ContreeClientAdapter,
         directory_state_id: int,
         synced_files: set[FileState],
         root: Path,
@@ -371,7 +371,7 @@ class FileCache:
 
     async def sync_directory(
         self,
-        client: ContreeClient,
+        client: ContreeClientAdapter,
         path: Path,
         destination: str,
         excludes: Iterable[str] = (),

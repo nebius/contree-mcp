@@ -13,8 +13,9 @@ license-files = ["LICENSE"]
 dependencies = [
     "aiosqlite>=0.19.0",
     "argclass>=1.7.0",
+    "contree-client[httpx]==0.2.0",
     "httpx>=0.28.0",        # transitive dependency from mcp, so we have to use it and pin version here
-    "mcp>=1.0.0",
+    "mcp>=1.28,<2",
     "pydantic>=2.0.0",      # transitive dependency from mcp, so we have to use it and pin version here
 ]
 

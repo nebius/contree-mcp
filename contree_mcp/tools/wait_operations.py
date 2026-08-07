@@ -4,8 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import OperationKind, OperationResponse, OperationStatus
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import OperationKind, OperationResponse, OperationStatus
 
 
 class WaitOperationsOutput(BaseModel):
@@ -47,7 +47,7 @@ async def wait_operations(
         nonlocal results
         try:
             result = await client.wait_for_operation(op_id, max_wait=timeout)
-            results[op_id] = result
+            results[op_id] = OperationResponse.model_validate(result.to_dict())
         except Exception as e:
             # On error (timeout, connection error, etc.), mark as failed
             results[op_id] = OperationResponse(

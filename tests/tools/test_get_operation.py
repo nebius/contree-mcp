@@ -1,48 +1,36 @@
 import pytest
+from contree_client.models import OperationResponse as SDKOperationResponse
+from contree_client.models import OperationStatus as SDKOperationStatus
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import (
-    ConsumedResources,
+from contree_mcp.tools.get_operation import get_operation
+from contree_mcp.tools.mcp_types import (
     InstanceMetadata,
-    InstanceResult,
     OperationKind,
     OperationResponse,
-    OperationResult,
     OperationStatus,
-    ProcessExitState,
-    Stream,
 )
-from contree_mcp.tools.get_operation import get_operation
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
+from .sdk_factories import import_operation as sdk_import_operation
+from .sdk_factories import instance_operation
 
 
 class TestGetOperationFromAPI(TestCase):
     """Test get_operation fetching from API."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-1",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "error": None,
-                    "metadata": {
-                        "command": "echo hello",
-                        "image": "img-1",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="hello", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=0.5),
-                        ),
-                    },
-                    "result": OperationResult(image="img-result", tag=None),
-                }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            instance_operation(
+                uuid="op-1",
+                command="echo hello",
+                stdout="hello",
+                elapsed_time=0.5,
+                result_image="img-result",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_get_from_api(self) -> None:
@@ -57,29 +45,17 @@ class TestGetOperationFromAPI(TestCase):
 class TestGetInstanceOperation(TestCase):
     """Test get_operation for instance operations."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-instance-1",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "error": None,
-                    "metadata": {
-                        "command": "echo test",
-                        "image": "img-1",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="test output", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=1.5),
-                        ),
-                    },
-                    "result": OperationResult(image="img-result", tag=None),
-                }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            instance_operation(
+                uuid="op-instance-1",
+                stdout="test output",
+                elapsed_time=1.5,
+                result_image="img-result",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_get_instance_operation(self) -> None:
@@ -97,24 +73,17 @@ class TestGetInstanceOperation(TestCase):
 class TestGetImageImportOperation(TestCase):
     """Test get_operation for image import operations."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-import-1",
-                    "kind": OperationKind.IMAGE_IMPORT.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "error": None,
-                    "metadata": {
-                        "registry": {"url": "docker://test"},
-                        "tag": "python:3.11",
-                        "timeout": 300,
-                    },
-                    "result": {"image": "img-imported", "tag": "python:3.11"},
-                }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            sdk_import_operation(
+                uuid="op-import-1",
+                registry_url="docker://test",
+                tag="python:3.11",
+                result_image="img-imported",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_get_image_import_operation(self) -> None:
@@ -131,20 +100,18 @@ class TestGetImageImportOperation(TestCase):
 class TestGetFailedOperation(TestCase):
     """Test get_operation for failed operations."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-failed",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.FAILED.value,
-                    "error": "Command failed with exit code 1",
-                    "metadata": None,
-                    "result": None,
-                }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            SDKOperationResponse(
+                uuid="op-failed",
+                kind="instance",
+                status=SDKOperationStatus.FAILED,
+                error="Command failed with exit code 1",
+                created_at="2024-01-01T00:00:00Z",
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_get_failed_operation(self) -> None:

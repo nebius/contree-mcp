@@ -1,8 +1,8 @@
 import base64
 import os
 
-from contree_mcp.backend_types import FileResponse
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import FileResponse
 
 
 async def upload(

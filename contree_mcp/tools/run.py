@@ -1,7 +1,7 @@
 from typing import Any
 
-from contree_mcp.backend_types import OperationResponse
 from contree_mcp.context import CLIENT, FILES_CACHE
+from contree_mcp.tools.mcp_types import OperationResponse
 
 
 async def run(
@@ -108,5 +108,6 @@ async def run(
         max_layer_bytes=max_layer_bytes,
     )
     if wait:
-        return await client.wait_for_operation(operation_id)
+        result = await client.wait_for_operation(operation_id)
+        return OperationResponse.model_validate(result.to_dict())
     return {"operation_id": operation_id}

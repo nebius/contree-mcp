@@ -3,18 +3,15 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from contree_client import NotFoundError
+from contree_client.testing import ContreeAsyncClient
 
 from contree_mcp.tools.download import DownloadOutput, download
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
 
 class TestDownloadValidation(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {}
-
     @pytest.mark.asyncio
     async def test_rejects_relative_destination_path(self):
         with pytest.raises(ValueError, match="absolute path"):
@@ -24,11 +21,9 @@ class TestDownloadValidation(TestCase):
 
 
 class TestDownloadHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/{uuid}/download": FakeResponse(body="file content here"),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_download(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_image_download_stream", [b"file content here"])
 
     @pytest.mark.asyncio
     async def test_basic_download(self) -> None:
@@ -97,16 +92,13 @@ class TestDownloadHappyPath(TestCase):
 
 
 class TestDownloadErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        from http import HTTPStatus
-
-        return {
-            "GET /inspect/{uuid}/download": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "File not found"},
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_download_error(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "inspect_image_download_stream",
+            [b"partial"],
+            error=NotFoundError(404, "File not found"),
+        )
 
     @pytest.mark.asyncio
     async def test_partial_file_deleted_on_error(self) -> None:

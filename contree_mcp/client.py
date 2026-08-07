@@ -1,51 +1,42 @@
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
 import importlib.metadata
-import json
 import logging
 import platform
 import sys
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager, suppress
-from functools import cached_property
-from io import BytesIO
-from types import MappingProxyType
-from typing import IO, Any, Generic, Literal, TypeVar
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from contextlib import aclosing, asynccontextmanager, suppress
+from types import EllipsisType, MappingProxyType
+from typing import IO, Any, Literal, TypeGuard, cast
 from urllib.parse import unquote
 from uuid import UUID
 
-import httpx
-from httpx import Headers
-from pydantic import BaseModel, ByteSize
-from typing_extensions import Self
-
-from .backend_types import (
+from contree_client import ContreeAPIError, ContreeError, NotFoundError, RequestSpec
+from contree_client.httpx import ContreeAsyncClient as HTTPXContreeAsyncClient
+from contree_client.models import (
+    ClosableStreamRepr,
     DirectoryList,
     FileResponse,
+    FileSpec,
     Image,
-    ImageCredentials,
-    ImageListResponse,
-    ImageRegistry,
-    ImportImageMetadata,
-    InstanceFileSpec,
-    InstanceMetadata,
+    ImageImportRegistry,
+    ImageImportRegistryCredentials,
     InstanceResourcesLimits,
-    InstanceSpawnResponse,
-    OperationEventType,
-    OperationKind,
-    OperationListResponse,
     OperationResponse,
     OperationResult,
     OperationStatus,
     OperationSummary,
-    Stream,
+    StreamRepr,
     WhoAmIResponse,
 )
+from contree_client.types import ContreeAsyncClient
+from typing_extensions import Self
+
 from .cache import Cache
 from .config import AuthType, Config, ConfigProfile
-
-ModelT = TypeVar("ModelT", bound=BaseModel)
 
 OperationTrackingKind = Literal["instance", "image_import"]
 
@@ -60,199 +51,35 @@ def mcp_version() -> str:
         return "unknown"
 
 
-# Single source of truth for the User-Agent string. Used by:
-#  - the ContreeClient HTTP headers (every backend call)
-#  - the UpdateChecker PyPI request (so PyPI sees the same identifier)
-#  - the ``--version`` CLI flag (so users can read the exact UA we emit)
-MCP_USER_AGENT = (
-    f"contree-mcp/{mcp_version()} "
-    f"Python/{'.'.join(map(str, sys.version_info))} "
-    f"{platform.platform()}"
-)
+# Shared by the SDK application identity, update checks, and ``--version``.
+# The SDK prepends this identity to its own product and transport tokens.
+MCP_USER_AGENT = f"contree-mcp/{mcp_version()} Python/{'.'.join(map(str, sys.version_info))} {platform.platform()}"
 
 
-class StreamResponse:
-    __slots__ = ("status", "headers", "body_iter")
+class ContreeClientAdapter:
+    """MCP-specific adapter around the official asynchronous Contree SDK.
 
-    status: int
-    headers: Headers
-    body_iter: AsyncIterator[bytes]
-
-    def __init__(self, status: int, headers: Headers, body_iter: AsyncIterator[bytes]):
-        self.status = status
-        self.headers = headers
-        self.body_iter = body_iter
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self.body_iter:
-            yield chunk
-
-
-class StructuredResponse(Generic[ModelT]):
-    __slots__ = ("status", "headers", "body")
-
-    headers: Headers
-    status: int
-    body: ModelT
-
-    def __init__(self, status: int, headers: Headers, body: ModelT):
-        self.status = status
-        self.headers = headers
-        self.body = body
-
-    @classmethod
-    async def from_stream(
-        cls,
-        stream_response: StreamResponse,
-        model: type[ModelT],
-        payload_limit: int = 64 * 1024,
-    ) -> "StructuredResponse[ModelT]":
-        content_length = int(stream_response.headers.get("Content-Length", "-1"))
-        if content_length > payload_limit:
-            raise ContreeError(f"Response too large ({content_length} bytes) for streaming response")
-        with BytesIO() as stream:
-            async for chunk in stream_response:
-                stream.write(chunk)
-            text = stream.getvalue().decode("utf-8").strip()
-        try:
-            body = model.model_validate(json.loads(text))
-        except ValueError as e:
-            raise ContreeError(f"Streaming response: invalid JSON: {e}") from e
-        except Exception as e:
-            raise ContreeError(f"Streaming response: failed to parse response: {e}") from e
-        return cls(stream_response.status, stream_response.headers, body)
-
-
-class ContreeError(Exception):
-    def __init__(self, message: str, status_code: int | None = None):
-        super().__init__(message)
-        self.message = message
-        self.status_code = status_code
-
-
-async def iter_sse_events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, Any]]:
-    """Yield one dict per SSE frame parsed from *lines*.
-
-    Normal frames carry an OperationEvent JSON object in ``data:`` —
-    that object is yielded as-is (it already contains ``id`` / ``type`` /
-    ``data``). Server-pushed error frames use ``event: sse_error`` with a
-    plain-text ``data:`` body — those surface as
-    ``{"type": "sse_error", "message": <text>}`` so callers can decide to
-    reconnect with ``Last-Event-Id``. Keepalive comments are discarded.
-    """
-    data_lines: list[str] = []
-    event_name: str | None = None
-    event_id: str | None = None
-
-    def emit() -> dict[str, Any] | None:
-        nonlocal event_name, event_id
-        name, eid = event_name, event_id
-        event_name = None
-        event_id = None
-        if not data_lines:
-            return None
-        body = "\n".join(data_lines)
-        data_lines.clear()
-        if name == OperationEventType.SSE_ERROR:
-            return {"type": OperationEventType.SSE_ERROR.value, "message": body}
-        try:
-            decoded = json.loads(body)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(decoded, dict):
-            return None
-        if eid is not None and "id" not in decoded:
-            with suppress(ValueError):
-                decoded["id"] = int(eid)
-        return decoded
-
-    async for raw_line in lines:
-        line = raw_line.rstrip("\r\n")
-        if not line:
-            event = emit()
-            if event is not None:
-                yield event
-        elif line.startswith(":"):
-            pass  # SSE comment / keepalive
-        elif line.startswith("data:"):
-            data_lines.append(line[5:].lstrip(" "))
-        elif line.startswith("event:"):
-            event_name = line[6:].strip() or None
-        elif line.startswith("id:"):
-            event_id = line[3:].strip() or None
-
-    event = emit()
-    if event is not None:
-        yield event
-
-
-def retry_after_seconds(headers: Headers, default: float = 1.0) -> float:
-    try:
-        return max(0.0, float(headers.get("Retry-After", "")))
-    except ValueError:
-        return default
-
-
-class ContreeClient:
-    """HTTP client for the Contree backend.
-
-    Supports the two auth modes defined by the API:
-
-    - ``AuthType.JWT`` — legacy self-issued bearer token (e.g. the
-      ``contree.dev`` deployment). Sends ``Authorization: Bearer <token>``.
-    - ``AuthType.IAM`` — Nebius IAM token plus a project ID. Sends
-      ``Authorization: Bearer <token>`` and ``Project: <project>``.
-
-    The defaults make a JWT client (token only) the cheapest construction
-    so existing call sites keep working. Use :meth:`from_profile` to
-    build the right client from a resolved :class:`ConfigProfile`.
+    Configuration remains owned by :class:`Config`; this class only maps the
+    already-resolved profile into the SDK and adds immutable-response caches,
+    operation tracking, lineage, and shutdown cancellation.
     """
 
-    # SSE reconnect tuning for the /operations/{id}/events stream.
-    SSE_RETRY_LIMIT = 5
-    SSE_RETRY_DELAY = 2.0
-    # Floor applied when a connect/read cycle made no forward progress —
-    # guards against a server that returns immediate empty streams.
-    SSE_PROGRESS_FLOOR = 0.5
-    # GET-polling interval used when the events endpoint is unavailable
-    # (older backends, unsupported operation kinds, missing permission).
     FALLBACK_POLL_INTERVAL = 1.0
 
-    # Default base URL per auth scheme. Mirrors
-    # ``contree_cli.client.ContreeIAMClient.DEFAULT_URL`` / ``ContreeJWTClient``
-    # (which has no default — the legacy ``contree.dev`` URL must be
-    # supplied explicitly). The IAM value is sourced from ``Config`` so
-    # the resolver and the client never drift.
-    DEFAULT_URLS: Mapping[AuthType, str] = MappingProxyType({
-        AuthType.IAM: Config.DEFAULT_IAM_URL,
-        AuthType.JWT: "",
-    })
-
-    HEADERS = (
-        ("Content-Type", "application/json"),
-        ("User-Agent", MCP_USER_AGENT),
+    DEFAULT_URLS: Mapping[AuthType, str] = MappingProxyType(
+        {
+            AuthType.IAM: Config.DEFAULT_IAM_URL,
+            AuthType.JWT: "",
+        }
     )
 
     def __init__(
         self,
-        base_url: str,
-        token: str,
         cache: Cache,
-        project: str | None = None,
-        timeout: float = 30.0,
-        auth_type: AuthType = AuthType.JWT,
-    ):
-        if auth_type == AuthType.IAM and not project:
-            raise ValueError("IAM auth requires a project ID")
-        if auth_type == AuthType.JWT and project:
-            log.debug("JWT client constructed with a project — Project header will not be sent")
-        self.base_url = base_url.rstrip("/") + "/v1"
-        self.token = token
-        self.project = project
-        self.auth_type = auth_type
-        self.timeout = httpx.Timeout(timeout)
+        client: ContreeAsyncClient,
+    ) -> None:
         self._cache = cache
-
+        self._client = client
         self._tracked_operations: dict[str, asyncio.Task[OperationResponse]] = {}
 
     @classmethod
@@ -262,17 +89,7 @@ class ContreeClient:
         cache: Cache,
         timeout: float = 30.0,
     ) -> Self:
-        """Build a client from a resolved :class:`ConfigProfile`.
-
-        Mirrors ``contree_cli.client.client_from_profile``: validates
-        token / project / url against the profile's ``auth_type`` and
-        produces a client wired for the correct auth scheme.
-
-        URL fallback follows the CLI: IAM falls back to
-        :attr:`DEFAULT_URLS` (Nebius IAM endpoint); JWT must have an
-        explicit URL because the legacy ``contree.dev`` host can't be
-        inferred.
-        """
+        """Build a service from credentials already resolved by ``Config``."""
         if not profile.token:
             raise ValueError(f"profile {profile.name!r} has no token")
         base_url = profile.url or cls.DEFAULT_URLS[profile.auth_type]
@@ -281,139 +98,56 @@ class ContreeClient:
                 f"profile {profile.name!r} ({profile.auth_type}) has no url and "
                 f"this auth scheme has no default — pass --url",
             )
-        return cls(
+        if profile.auth_type == AuthType.IAM and not profile.project:
+            raise ValueError("IAM auth requires a project ID")
+        client = HTTPXContreeAsyncClient(
+            profile.token,
             base_url=base_url,
-            token=profile.token,
-            cache=cache,
-            project=profile.project,
+            project=profile.project if profile.auth_type == AuthType.IAM else None,
             timeout=timeout,
-            auth_type=profile.auth_type,
+            retry=None,
+            identity=MCP_USER_AGENT,
+        )
+        return cls(
+            cache=cache,
+            client=client,
         )
 
     @property
     def cache(self) -> Cache:
-        if self._cache is None:
-            raise RuntimeError("Cache is not configured")
         return self._cache
 
-    @cached_property
-    def headers(self) -> Mapping[str, str]:
-        hdrs = dict(self.HEADERS)
-        hdrs["Authorization"] = f"Bearer {self.token}"
-        # IAM requires the Project header; JWT must not send it even if
-        # ``project`` happens to be set (the legacy backend would reject).
-        if self.auth_type == AuthType.IAM:
-            assert self.project, "IAM client missing project — should have been caught in __init__"
-            hdrs["Project"] = self.project
-        return MappingProxyType(hdrs)
-
-    @cached_property
-    def session(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(headers=self.headers, timeout=self.timeout)
-
-    async def cancel_incomplete_operations(self) -> None:
-        async def try_cancel(op_id: str) -> None:
-            op = await self.get_operation(op_id)
-            if not op.status.is_terminal():
-                await self.cancel_operation(op_id)
-
-        await asyncio.gather(*[try_cancel(op_id) for op_id in self._tracked_operations], return_exceptions=True)
+    @property
+    def client(self) -> ContreeAsyncClient:
+        """The wrapped Contree client, exposed for focused adapter diagnostics."""
+        return self._client
 
     async def close(self) -> None:
         if self._tracked_operations:
-            log.info("Cancelling %d tracked operations", len(self._tracked_operations))
+            tracked = dict(self._tracked_operations)
+            log.info("Cancelling %d tracked operations", len(tracked))
 
-            for task in self._tracked_operations.values():
+            for task in tracked.values():
                 task.cancel()
 
             await asyncio.gather(
-                *self._tracked_operations.values(), self.cancel_incomplete_operations(), return_exceptions=True
+                *tracked.values(),
+                return_exceptions=True,
+            )
+            await asyncio.gather(
+                *(self.cancel_operation(operation_id) for operation_id in tracked),
+                return_exceptions=True,
             )
             self._tracked_operations.clear()
 
-        if "session" in self.__dict__:
-            await asyncio.gather(self.session.aclose(), return_exceptions=True)
-            del self.__dict__["session"]
+        await self._client.close()
 
     async def __aenter__(self) -> Self:
+        await self._client.open()
         return self
 
     async def __aexit__(self, *args: Any) -> None:
         await self.close()
-
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        model: type[ModelT],
-        params: dict[str, Any] | None = None,
-        json: dict[str, Any] | None = None,
-        headers: dict[str, str] | None = None,
-        content: bytes | IO[bytes] | None = None,
-        follow_redirects: bool = True,
-        payload_limit: int = 64 * 1024,
-    ) -> "StructuredResponse[ModelT]":
-        async with self._stream_request(
-            method,
-            path,
-            params=params,
-            json=json,
-            headers=headers,
-            content=content,
-            follow_redirects=follow_redirects,
-        ) as stream_response:
-            return await StructuredResponse.from_stream(
-                stream_response,
-                model=model,
-                payload_limit=payload_limit,
-            )
-
-    @asynccontextmanager
-    async def _stream_request(
-        self,
-        method: str,
-        path: str,
-        chunk_size: int = 64 * 1024,
-        retry_time: int | float = 2,
-        retry_count: int = 5,
-        **kwargs: Any,
-    ) -> AsyncIterator[StreamResponse]:
-        """
-        Perform an HTTP request and yield a streaming response.
-        Retries on server errors (5xx).
-        Raises ContreeError on client errors (4xx).
-        """
-        url = f"{self.base_url}/{path.lstrip('/')}"
-        log.debug("%s %s (streaming)", method, path)
-        for _ in range(retry_count):
-            async with self.session.stream(method, url, **kwargs) as response:
-                if response.status_code >= 400:
-                    error_body = await response.aread()
-                    try:
-                        error_msg = json.loads(error_body).get("error", error_body.decode())
-                    except Exception:
-                        error_msg = error_body.decode()
-
-                    log.debug("%s %s -> %d: %s", method, path, response.status_code, error_msg)
-                    raise ContreeError(error_msg, response.status_code)
-                if response.status_code >= 500:
-                    log.debug("%s %s -> %d: server error, retrying...", method, path, response.status_code)
-                    await asyncio.sleep(retry_time)
-                    continue  # Retry on server errors
-
-                log.debug("%s %s -> %d (streaming)", method, path, response.status_code)
-
-                async def chunk_iterator() -> AsyncIterator[bytes]:
-                    async for chunk in response.aiter_bytes(chunk_size):
-                        yield chunk
-
-                yield StreamResponse(status=response.status_code, headers=response.headers, body_iter=chunk_iterator())
-                return
-
-    async def _head_request(self, path: str, params: dict[str, Any] | None = None) -> int:
-        async with self._stream_request("HEAD", path, params=params) as response:
-            return response.status
 
     async def list_images(
         self,
@@ -424,19 +158,19 @@ class ContreeClient:
         since: str | None = None,
         until: str | None = None,
     ) -> list[Image]:
-        params: dict[str, Any] = {"limit": limit, "offset": offset}
-        if tagged is not None:
-            params["tagged"] = "1" if tagged else "0"
-        if tag_prefix:
-            # Strip trailing separators - backend validates tag format strictly
-            params["tag"] = tag_prefix.rstrip(":/.")
-        if since:
-            params["since"] = since
-        if until:
-            params["until"] = until
-
-        response = await self._request("GET", "/images", model=ImageListResponse, params=params)
-        return response.body.images
+        tag = tag_prefix.rstrip(":/.") if tag_prefix else None
+        response = await self._client.list_images(
+            limit=limit,
+            offset=offset,
+            tagged=bool(tagged),
+            tag=tag,
+            since=since,
+            until=until,
+        )
+        images = response.images
+        if isinstance(images, EllipsisType):
+            return []
+        return images
 
     async def import_image(
         self,
@@ -446,26 +180,12 @@ class ContreeClient:
         password: str | None = None,
         timeout: int = 300,
     ) -> str:
-        credentials = ImageCredentials()
+        credentials: ImageImportRegistryCredentials | EllipsisType = ...
         if username and password:
-            credentials = ImageCredentials(username=username, password=password)
+            credentials = ImageImportRegistryCredentials(username=username, password=password)
 
-        metadata = ImportImageMetadata(
-            registry=ImageRegistry(url=registry_url, credentials=credentials),
-            tag=tag,
-            timeout=timeout,
-        )
-
-        response = await self._request(
-            "POST", "/images/import", model=InstanceSpawnResponse, json=metadata.model_dump(exclude_none=True)
-        )
-        operation_id = response.body.uuid
-
-        if not operation_id:
-            # Fallback to Location header
-            location = response.headers.get("Location", "") or response.headers.get("location", "")
-            operation_id = location.split("/")[-1] if location else ""
-
+        registry = ImageImportRegistry(url=registry_url, credentials=credentials)
+        operation_id = await self._client.import_image(registry, tag=tag, timeout=timeout)
         if not operation_id:
             raise ContreeError("No operation ID returned from import request")
 
@@ -475,28 +195,21 @@ class ContreeClient:
         return operation_id
 
     async def tag_image(self, image_uuid: str, tag: str) -> Image:
-        response = await self._request("PATCH", f"/images/{image_uuid}/tag", model=Image, json={"tag": tag})
-        return response.body
+        return await self._client.update_image_tag(image_uuid, tag)
 
     async def untag_image(self, image_uuid: str) -> Image:
-        async with self._stream_request("DELETE", f"/images/{image_uuid}/tag") as response:
-            async for _ in response:
-                pass
-            log.debug("DELETE /images/%s/tag -> %d", image_uuid, response.status)
+        await self._client.delete_image_tag(image_uuid)
         return await self.get_image(image_uuid)
 
     async def get_image_by_tag(self, tag: str) -> Image:
-        response = await self._request("GET", "/inspect/", model=Image, params={"tag": tag}, follow_redirects=True)
-
-        return response.body
+        image_uuid = await self._client.inspect_find_image_by_tag(tag)
+        return await self.get_image(image_uuid)
 
     async def get_image(self, image_uuid: str) -> Image:
-        response = await self._request("GET", f"/inspect/{image_uuid}/", model=Image)
-        return response.body
+        return await self._client.inspect_image(image_uuid)
 
     async def whoami(self) -> WhoAmIResponse:
-        response = await self._request("GET", "/whoami", model=WhoAmIResponse)
-        return response.body
+        return await self._client.whoami()
 
     async def list_directory(self, image_uuid: str, path: str = "/") -> DirectoryList:
         path = f"/{path.lstrip('/')}"
@@ -504,157 +217,116 @@ class ContreeClient:
 
         entry = await self.cache.get("list_dir", cache_key)
         if entry:
-            return DirectoryList.model_validate(entry.data)
+            return DirectoryList.from_dict(dict(entry.data))
 
-        response = await self._request(
-            "GET", f"/inspect/{image_uuid}/list", model=DirectoryList, params={"path": path}
-        )
-
-        await self.cache.put("list_dir", cache_key, response.body.model_dump())
-        return response.body
+        result = await self._client.inspect_image_list(image_uuid, path)
+        await self.cache.put("list_dir", cache_key, result.to_dict())
+        return result
 
     async def list_directory_text(self, image_uuid: str, path: str = "/") -> str:
-        """List files in an image directory as ls-like text format.
-
-        Uses the backend's text format option which returns output similar to `ls -l`.
-        Image content is immutable - no TTL needed.
-        """
+        """List files in an image directory as ls-like text format."""
         path = f"/{path.lstrip('/')}"
         cache_key = f"{image_uuid}:{path}:text"
         entry = await self.cache.get("list_dir_text", cache_key)
         if entry:
             return str(entry.data["text"])
-        async with self._stream_request(
-            "GET", f"/inspect/{image_uuid}/list", params={"path": path, "text": ""}
-        ) as chunk_iter:
-            with BytesIO() as stream:
-                async for chunk in chunk_iter:
-                    stream.write(chunk)
-                result = stream.getvalue().decode("utf-8")
+
+        # Keep using contree-client's low-level transport for the backend's
+        # `?text` variant for now. The decision between returning JSON here or
+        # moving the ls-like formatting into contree-client is temporarily
+        # deferred.
+        spec = RequestSpec(
+            method="GET",
+            path=f"/inspect/{image_uuid}/list",
+            query={"path": path, "text": ""},
+            accept="text/plain",
+            idempotent=True,
+        )
+        chunks: list[bytes] = []
+        async with aclosing(self._client.stream(spec)) as source:
+            async for chunk in source:
+                chunks.append(chunk)
+        result = b"".join(chunks).decode("utf-8")
         await self.cache.put("list_dir_text", cache_key, {"text": result})
         return result
 
     async def read_file(self, image_uuid: str, path: str) -> bytes:
-        """Read a file from an image. Image content is immutable - no TTL needed."""
         cache_key = f"{image_uuid}:{path}"
-
         entry = await self.cache.get("read_file", cache_key)
         if entry:
             return base64.b64decode(entry.data["content"])
 
-        path = f"/{path.lstrip('/')}"
-
-        async with self._stream_request("GET", f"/inspect/{image_uuid}/download", params={"path": path}) as chunk_iter:
-            with BytesIO() as stream:
-                async for chunk in chunk_iter:
-                    stream.write(chunk)
-                result = stream.getvalue()
-
+        normalized_path = f"/{path.lstrip('/')}"
+        result = await self._client.inspect_image_download(image_uuid, normalized_path)
         await self.cache.put("read_file", cache_key, {"content": base64.b64encode(result).decode()})
         return result
 
     @asynccontextmanager
     async def stream_file(
-        self, image_uuid: str, path: str, chunk_size: int = 64 * 1024
-    ) -> AsyncIterator[AsyncIterator[bytes]]:
-        """Stream a file from an image in chunks.
+        self,
+        image_uuid: str,
+        path: str,
+        chunk_size: int = 64 * 1024,
+    ) -> AsyncGenerator[AsyncIterator[bytes], None]:
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        source = self._client.inspect_image_download_stream(image_uuid, path)
 
-        Usage:
-            async with client.stream_file(image_uuid, path) as chunks:
-                async for chunk in chunks:
-                    file.write(chunk)
-        """
-        params: dict[str, Any] = {"path": path}
-        async with self._stream_request(
-            "GET",
-            f"/inspect/{image_uuid}/download",
-            params=params,
-            chunk_size=chunk_size,
-        ) as chunks:
-            yield chunks  # type: ignore[misc]
+        async def chunks() -> AsyncIterator[bytes]:
+            async for chunk in source:
+                for offset in range(0, len(chunk), chunk_size):
+                    yield chunk[offset : offset + chunk_size]
+
+        async with aclosing(source):
+            yield chunks()
 
     async def file_exists(self, image_uuid: str, path: str) -> bool:
-        """Check if a file exists in an image. Image content is immutable - no TTL needed."""
         cache_key = f"{image_uuid}:{path}"
-
         entry = await self.cache.get("file_exists", cache_key)
         if entry:
             return bool(entry.data["exists"])
-
-        try:
-            status = await self._head_request(f"/inspect/{image_uuid}/download", params={"path": path})
-            exists = status == 200
-        except Exception:
-            exists = False
-
+        exists = await self._client.check_image_file(image_uuid, path)
         await self.cache.put("file_exists", cache_key, {"exists": exists})
         return exists
 
     async def upload_file(self, content: bytes | IO[bytes]) -> FileResponse:
-        """Upload a file to the server.
-
-        Computes SHA256 hash and checks cache/server before uploading to avoid duplicates.
-
-        Args:
-            content: File content as bytes or a file-like object (IO[bytes]).
-                     Using IO[bytes] allows streaming without loading entire file into RAM.
-        """
         # If content is file-like, read it (httpx content param expects bytes)
         if hasattr(content, "read"):
             content = content.read()
 
-        # Compute SHA256 hash
-        sha256 = hashlib.sha256(content).hexdigest()
+        if not isinstance(content, bytes):
+            raise TypeError("file content must be bytes")
 
+        sha256 = hashlib.sha256(content).hexdigest()
         # Check if file already exists (cache + server)
         existing = await self.get_file_by_hash(sha256)
         if existing:
             log.debug("File already exists: uuid=%s sha256=%s...", existing.uuid, sha256[:16])
             return existing
 
-        # Upload new file
-        size = len(content)
-        log.debug("Uploading file (%s bytes, sha256=%s...)", size, sha256[:16])
-
-        response = await self._request(
-            "POST",
-            "/files",
-            model=FileResponse,
-            content=content,
-            headers={"Content-Type": "application/octet-stream"},
-        )
-
-        # Cache the response by hash
-        await self.cache.put("file_by_hash", sha256, response.body.model_dump())
-
-        log.debug("Uploaded file: uuid=%s sha256=%s...", response.body.uuid, response.body.sha256[:16])
-        return response.body
+        result = await self._client.upload_file(content)
+        await self.cache.put("file_by_hash", sha256, result.to_dict())
+        log.debug("Uploaded file: uuid=%s sha256=%s...", result.uuid, result.sha256[:16])
+        return result
 
     async def check_file_exists_by_hash(self, sha256: str) -> bool:
-        """Check if file exists on server by SHA256 hash. Always hits server (no cache)."""
-        try:
-            status = await self._head_request(f"/files/{sha256}")
-            return status == 200
-        except Exception:
-            return False
+        return await self._client.check_file_exists(sha256)
 
     async def get_file_by_hash(self, sha256: str) -> FileResponse | None:
-        """Get file UUID by SHA256 hash. Hash-based lookup is immutable - no TTL needed."""
         entry = await self.cache.get("file_by_hash", sha256)
         if entry:
             if entry.data.get("not_found"):
                 return None
-            return FileResponse.model_validate(entry.data)
+            return FileResponse.from_dict(dict(entry.data))
 
         try:
-            response = await self._request("GET", f"/files/{sha256}", model=FileResponse)
-            await self.cache.put("file_by_hash", sha256, response.body.model_dump())
-            return response.body
-        except ContreeError as e:
-            if e.status_code == 404:
-                await self.cache.put("file_by_hash", sha256, {"not_found": True})
-                return None
-            raise
+            result = await self._client.get_file(sha256)
+        except NotFoundError:
+            await self.cache.put("file_by_hash", sha256, {"not_found": True})
+            return None
+
+        await self.cache.put("file_by_hash", sha256, result.to_dict())
+        return FileResponse(uuid=result.uuid, sha256=result.sha256, size=result.size)
 
     async def spawn_instance(
         self,
@@ -675,17 +347,15 @@ class ContreeClient:
         truncate_output_at: int = 1048576,
         max_layer_bytes: int | None = None,
     ) -> str:
-        resources_limits = (
-            InstanceResourcesLimits(max_layer_bytes=max_layer_bytes)
-            if max_layer_bytes is not None
-            else InstanceResourcesLimits()
-        )
-        metadata = InstanceMetadata(
-            command=command,
-            image=image,
+        layer_limit = 12 * 1024**3 if max_layer_bytes is None else max_layer_bytes
+        stdin_stream = StreamRepr.from_bytes(stdin.encode()) if stdin else StreamRepr(value="", encoding="ascii")
+        sdk_files = {path: FileSpec(**spec) for path, spec in (files or {}).items()}
+        response = await self._client.spawn_instance(
+            command,
+            image,
             shell=shell,
             args=args or [],
-            env=env or {},
+            env=cast(dict[str, str], env or {}),
             preserve_env=preserve_env,
             cwd=cwd,
             uid=uid,
@@ -693,15 +363,13 @@ class ContreeClient:
             timeout=timeout,
             hostname=hostname,
             disposable=disposable,
-            resources_limits=resources_limits,
-            stdin=Stream.from_bytes(stdin.encode()) if stdin else Stream(value=""),
-            truncate_output_at=ByteSize(truncate_output_at),
-            files={k: InstanceFileSpec(**v) for k, v in (files or {}).items()},
+            stdin=ClosableStreamRepr(value=stdin_stream.value, encoding=stdin_stream.encoding),
+            files=sdk_files,
+            truncate_output_at=truncate_output_at,
+            resources_limits=InstanceResourcesLimits(max_layer_bytes=layer_limit),
         )
-
-        response = await self._request("POST", "/instances", model=InstanceSpawnResponse, json=metadata.model_dump())
-        operation_id = response.body.uuid
-        if not operation_id:
+        operation_id = response.uuid
+        if not isinstance(operation_id, str) or not operation_id:
             raise ContreeError("No operation ID returned from spawn_instance")
         self._track_operation(operation_id, kind="instance", input_image=image, command=command)
         log.debug(
@@ -717,63 +385,61 @@ class ContreeClient:
         limit: int = 100,
         offset: int = 0,
         status: OperationStatus | None = None,
-        kind: OperationKind | None = None,
+        kind: Literal["image_import", "instance"] | None = None,
         since: str | None = None,
         until: str | None = None,
     ) -> list[OperationSummary]:
-        params: dict[str, Any] = {
-            "limit": limit,
-            "offset": offset,
-            "status": status,
-            "kind": kind,
-            "since": since,
-            "until": until,
-        }
-        # Remove None values
-        params = {k: v for k, v in params.items() if v is not None}
-        response = await self._request("GET", "/operations", model=OperationListResponse, params=params)
-        return response.body.operations
+        return await self._client.list_operations(
+            limit=limit,
+            offset=offset,
+            status=status,
+            kind=kind,
+            since=since,
+            until=until,
+        )
+
+    @staticmethod
+    def _is_terminal_status(status: OperationStatus | EllipsisType) -> TypeGuard[OperationStatus]:
+        return isinstance(status, OperationStatus) and status.is_terminal()
 
     async def _fetch_operation(self, operation_id: str) -> OperationResponse:
-        response = await self._request("GET", f"/operations/{operation_id}", model=OperationResponse)
-        result = response.body
+        result = await self._client.get_operation_status(operation_id)
+
         # Only terminal operations are immutable — caching a non-terminal
         # snapshot would go stale now that nothing refreshes it every second.
-        if result.status.is_terminal():
-            await self.cache.put("operation", operation_id, result.model_dump())
+        if self._is_terminal_status(result.status):
+            await self.cache.put("operation", operation_id, result.to_dict())
         return result
 
     async def get_operation(self, operation_id: str) -> OperationResponse:
         entry = await self.cache.get("operation", operation_id)
         if entry:
-            cached = OperationResponse.model_validate(entry.data)
-            if cached.status.is_terminal():
+            cached = OperationResponse.from_dict(dict(entry.data))
+            if self._is_terminal_status(cached.status):
                 return cached
         return await self._fetch_operation(operation_id)
 
     async def cancel_operation(self, operation_id: str) -> OperationStatus:
-        current_status = await self.get_operation(operation_id)
-        if current_status.status.is_terminal():
-            return current_status.status
-        async with self._stream_request("DELETE", f"/operations/{operation_id}") as response:
-            if response.status > 400:
-                raise ContreeError(f"Failed to cancel operation {operation_id}: HTTP {response.status}")
+        current = await self.get_operation(operation_id)
+        if self._is_terminal_status(current.status):
+            return current.status
+        await self._client.cancel_operation(operation_id)
         log.info("Cancelled operation %s", operation_id)
         return OperationStatus.CANCELLED
 
     async def wait_for_operation(self, operation_id: str, max_wait: float | None = None) -> OperationResponse:
         task = self._tracked_operations.get(operation_id)
         if task is None:
-            op = await self.get_operation(operation_id)
-            if op.status.is_terminal():
-                return op
-            kind: OperationTrackingKind = "instance" if op.kind == OperationKind.INSTANCE else "image_import"
+            operation = await self.get_operation(operation_id)
+            if self._is_terminal_status(operation.status):
+                return operation
+            kind: OperationTrackingKind = "instance" if operation.kind == "instance" else "image_import"
             task = self._track_operation(operation_id, kind=kind)
         try:
             return await asyncio.wait_for(asyncio.shield(task), timeout=max_wait)
-        except (asyncio.TimeoutError, TimeoutError) as e:
+        except (asyncio.TimeoutError, TimeoutError) as exc:
             await asyncio.shield(self.cancel_operation(operation_id))
-            raise ContreeError(f"Operation {operation_id} timed out after {max_wait}s") from e
+            raise ContreeError(f"Operation {operation_id} timed out after {max_wait}s") from exc
         except asyncio.CancelledError:
             with suppress(Exception):
                 await asyncio.shield(self.cancel_operation(operation_id))
@@ -796,122 +462,29 @@ class ContreeClient:
     def is_tracked(self, operation_id: str) -> bool:
         return operation_id in self._tracked_operations
 
-    @cached_property
-    def events_timeout(self) -> httpx.Timeout:
-        # The SSE stream idles between events (keepalive comments only) —
-        # a read timeout would kill long-running operations mid-wait.
-        return httpx.Timeout(
-            connect=self.timeout.connect,
-            read=None,
-            write=self.timeout.write,
-            pool=self.timeout.pool,
-        )
-
     async def fetch_terminal_operation(self, operation_id: str, interval: float) -> OperationResponse:
-        """GET the operation until its status is terminal."""
         while True:
             result = await self._fetch_operation(operation_id)
-            if result.status.is_terminal():
+            if self._is_terminal_status(result.status):
                 return result
-            log.debug("Operation %s still %s", operation_id, result.status.value)
+            log.debug("Operation %s still %s", operation_id, result.status)
             await asyncio.sleep(interval)
 
     async def watch_operation_events(self, operation_id: str) -> OperationResponse:
-        """Block on the SSE stream until the operation is terminal.
-
-        Consumes ``GET /operations/{id}/events?follow=1`` and returns the
-        authoritative ``GET /operations/{id}`` response once the terminal
-        ``completion`` event arrives. Reconnects with ``Last-Event-Id``
-        after stream drops; honours 425 (not streamable yet) and 410
-        (finished, events not yet durable) with their ``Retry-After``.
-        Degrades to plain GET polling when the events endpoint is
-        unavailable (older backends, unsupported operation kinds,
-        missing permission) or reconnects keep failing.
-        """
-        last_id = -1
-        failures = 0
-        while True:
-            headers: dict[str, str] = {}
-            if last_id >= 0:
-                headers["Last-Event-Id"] = str(last_id)
-            progressed = False
-            try:
-                async with self.session.stream(
-                    "GET",
-                    f"{self.base_url}/operations/{operation_id}/events",
-                    params={"follow": "1"},
-                    headers=headers,
-                    timeout=self.events_timeout,
-                ) as response:
-                    if response.status_code in (410, 425):
-                        # 410 means the operation already finished but the
-                        # event artifact is not durable yet — the terminal
-                        # GET result is authoritative, so return it instead
-                        # of retrying the stream into a misleading timeout.
-                        with suppress(Exception):
-                            result = await self._fetch_operation(operation_id)
-                            if result.status.is_terminal():
-                                return result
-                        delay = retry_after_seconds(response.headers)
-                        log.debug(
-                            "Events for %s not ready (HTTP %d), retrying in %.1fs",
-                            operation_id,
-                            response.status_code,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                        continue
-                    if 400 <= response.status_code < 500:
-                        log.debug(
-                            "Events endpoint unavailable for %s (HTTP %d), falling back to polling",
-                            operation_id,
-                            response.status_code,
-                        )
-                        break
-                    if response.status_code >= 500:
-                        failures += 1
-                    else:
-                        failures = 0
-                        async for event in iter_sse_events(response.aiter_lines()):
-                            event_id = event.get("id")
-                            if isinstance(event_id, int) and event_id > last_id:
-                                last_id = event_id
-                                progressed = True
-                            event_type = event.get("type")
-                            if event_type == OperationEventType.COMPLETION:
-                                return await self.fetch_terminal_operation(
-                                    operation_id, interval=self.SSE_PROGRESS_FLOOR
-                                )
-                            if event_type == OperationEventType.SSE_ERROR:
-                                log.warning(
-                                    "Server-side stream error for %s (last_id=%d): %s",
-                                    operation_id,
-                                    last_id,
-                                    event.get("message"),
-                                )
-            except httpx.HTTPError as exc:
-                failures += 1
-                log.debug("SSE stream for %s broken (last_id=%d): %s", operation_id, last_id, exc)
-
-            # Stream ended without a completion event — the op may already
-            # be terminal (e.g. the completion frame was lost in transit).
-            with suppress(Exception):
-                result = await self._fetch_operation(operation_id)
-                if result.status.is_terminal():
-                    return result
-
-            if failures >= self.SSE_RETRY_LIMIT:
-                log.warning(
-                    "Giving up on SSE for %s after %d failures, falling back to polling",
-                    operation_id,
-                    failures,
-                )
-                break
-            if failures:
-                await asyncio.sleep(self.SSE_RETRY_DELAY)
-            elif not progressed:
-                await asyncio.sleep(self.SSE_PROGRESS_FLOOR)
-
+        """Wait via the SDK's SSE follower, polling if events are unavailable."""
+        try:
+            result = await self._client.wait_operation(operation_id)
+            if self._is_terminal_status(result.status):
+                await self.cache.put("operation", operation_id, result.to_dict())
+                return result
+        except ContreeAPIError as exc:
+            if exc.status not in {400, 403, 404, 405, 406, 501}:
+                raise
+            log.debug(
+                "Events endpoint unavailable for %s (HTTP %d), falling back to polling",
+                operation_id,
+                exc.status,
+            )
         return await self.fetch_terminal_operation(operation_id, interval=self.FALLBACK_POLL_INTERVAL)
 
     async def stream_until_complete(
@@ -922,7 +495,7 @@ class ContreeClient:
     ) -> OperationResponse:
         try:
             result = await self.watch_operation_events(operation_id)
-            log.debug("Operation %s completed: %s", operation_id, result.status.value)
+            log.debug("Operation %s completed: %s", operation_id, result.status)
             await self._cache_lineage(operation_id, kind, result, metadata)
             return result
         finally:
@@ -939,11 +512,8 @@ class ContreeClient:
         is_success = op_result.status == OperationStatus.SUCCESS
         result_data = op_result.result
         if isinstance(result_data, OperationResult):
-            result_image = result_data.image
-            result_tag = result_data.tag
-        elif isinstance(result_data, dict):
-            result_image = result_data.get("image")
-            result_tag = result_data.get("tag")
+            result_image = result_data.image if isinstance(result_data.image, str) else None
+            result_tag = result_data.tag if isinstance(result_data.tag, str) else None
         else:
             result_image = None
             result_tag = None
@@ -981,9 +551,12 @@ class ContreeClient:
         image = unquote(image)
         if image.startswith("tag:"):
             img = await self.get_image_by_tag(image[4:])
-            return img.uuid
+            image_uuid = img.uuid
+            if not isinstance(image_uuid, str):
+                raise ContreeError(f"No image UUID returned for tag {image[4:]!r}")
+            return image_uuid
         try:
             UUID(image)
-        except ValueError as err:
-            raise ContreeError(f"Invalid image reference: {image!r}. Use UUID or 'tag:name' format.") from err
+        except ValueError as exc:
+            raise ContreeError(f"Invalid image reference: {image!r}. Use UUID or 'tag:name' format.") from exc
         return image

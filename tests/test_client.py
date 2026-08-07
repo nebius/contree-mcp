@@ -1,31 +1,34 @@
-"""Tests for ContreeClient."""
+"""Tests for the MCP-specific adapter around ``contree-client``."""
 
-import base64
+import asyncio
 import io
 from collections.abc import AsyncIterator
-from http import HTTPStatus
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
-
-from contree_mcp.backend_types import (
+from contree_client import ContreeAPIError, NotFoundError
+from contree_client.models import (
     DirectoryList,
-    OperationKind,
+    File,
+    FileItem,
+    FileResponse,
+    Image,
+    ImageListResponse,
+    InstanceSpawnResponse,
+    OperationResponse,
+    OperationResult,
     OperationStatus,
-    Stream,
+    OperationSummary,
+    WhoAmIResponse,
 )
+from contree_client.runtime import RequestSpec
+from contree_client.testing import ContreeAsyncClient
+
 from contree_mcp.cache import Cache
-from contree_mcp.client import ContreeClient, ContreeError, iter_sse_events
-from contree_mcp.config import AuthType, ConfigProfile
-from tests.conftest import (
-    FakeResponse,
-    FakeResponses,
-    FakeResponseSequence,
-    make_completion_event,
-    make_image,
-    make_sse_event,
-)
-from tests.tools import TestCase
+from contree_mcp.client import MCP_USER_AGENT, ContreeClientAdapter, ContreeError
+from contree_mcp.config import AuthType, Config, ConfigProfile
 
 
 @pytest.fixture
@@ -35,121 +38,165 @@ async def tmp_cache(tmp_path: Path) -> AsyncIterator[Cache]:
         yield cache
 
 
-class TestOperationStatusStr:
-    """Tests for OperationStatus.__str__ method."""
-
-    def test_str_returns_value(self):
-        assert str(OperationStatus.PENDING) == "PENDING"
-        assert str(OperationStatus.SUCCESS) == "SUCCESS"
-        assert str(OperationStatus.FAILED) == "FAILED"
-        assert str(OperationStatus.CANCELLED) == "CANCELLED"
-        assert str(OperationStatus.EXECUTING) == "EXECUTING"
-        assert str(OperationStatus.ASSIGNED) == "ASSIGNED"
-
-    def test_f_string_uses_value(self):
-        """Test that f-string formatting uses the value, not Enum repr."""
-        assert f"{OperationStatus.SUCCESS}" == "SUCCESS"
+@pytest.fixture
+def sdk_client_testing() -> ContreeAsyncClient:
+    """Create the official SDK's asynchronous test double."""
+    return ContreeAsyncClient()
 
 
-class TestOperationKindStr:
-    """Tests for OperationKind.__str__ method."""
+@pytest.fixture
+async def contree_client(
+    tmp_cache: Cache,
+    sdk_client_testing: ContreeAsyncClient,
+) -> AsyncIterator[ContreeClientAdapter]:
+    """Create the adapter around the SDK test double."""
+    async with ContreeClientAdapter(
+        cache=tmp_cache,
+        client=sdk_client_testing,
+    ) as client:
+        yield client
 
-    def test_str_returns_value(self):
-        assert str(OperationKind.INSTANCE) == "instance"
-        assert str(OperationKind.IMAGE_IMPORT) == "image_import"
 
-    def test_f_string_uses_value(self):
-        assert f"{OperationKind.INSTANCE}" == "instance"
+def make_image(
+    uuid: str = "img-1",
+    tag: str | None = "python:3.11",
+) -> Image:
+    return Image(
+        uuid=uuid,
+        tag=tag,
+        created_at="2026-01-01T00:00:00Z",
+        operation_uuid=None,
+    )
 
 
-class TestContreeClientInit:
-    """Tests for ContreeClient initialization."""
+def make_operation(
+    *,
+    uuid: str = "op-1",
+    kind: str = "instance",
+    status: OperationStatus = OperationStatus.SUCCESS,
+    image: str | None = "img-result",
+    tag: str | None = None,
+) -> OperationResponse:
+    return OperationResponse(
+        uuid=uuid,
+        kind=kind,  # type: ignore[arg-type]
+        status=status,
+        error=None,
+        created_at="2026-01-01T00:00:00Z",
+        result=OperationResult(image=image, tag=tag) if image is not None else None,
+    )
 
-    @pytest.mark.asyncio
-    async def test_init_strips_trailing_slash(self, tmp_cache: Cache) -> None:
-        """Test that trailing slash is stripped from base_url."""
-        client = ContreeClient("https://api.example.com/", "token", cache=tmp_cache)
-        assert client.base_url == "https://api.example.com/v1"
 
-    @pytest.mark.asyncio
-    async def test_init_adds_v1_suffix(self, tmp_cache: Cache) -> None:
-        """Test that /v1 is added to base_url."""
-        client = ContreeClient("https://api.example.com", "token", cache=tmp_cache)
-        assert client.base_url == "https://api.example.com/v1"
+def make_file(
+    uuid: str = "file-123",
+    sha256: str = "abc123",
+    size: int = 12,
+) -> File:
+    now = datetime.now(timezone.utc)
+    return File(
+        uuid=uuid,
+        sha256=sha256,
+        size=size,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 class TestContreeClientAuthType:
-    """Wire-format coverage for JWT vs IAM auth modes."""
+    """Tests for mapping resolved authentication profiles into the SDK."""
 
     @pytest.mark.asyncio
     async def test_jwt_headers_no_project(self, tmp_cache: Cache) -> None:
-        client = ContreeClient(
-            "https://contree.dev", "jwt-token", cache=tmp_cache,
+        profile = ConfigProfile(
+            name="jwt",
+            url="https://contree.dev",
+            token="jwt-token",
             auth_type=AuthType.JWT,
         )
-        assert client.headers["Authorization"] == "Bearer jwt-token"
-        assert "Project" not in client.headers
+        client = ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
+        try:
+            headers = dict(client.client.build_headers(RequestSpec("GET", "/whoami")))
+            assert headers["Authorization"] == "Bearer jwt-token"
+            assert "Project" not in headers
+        finally:
+            await client.close()
 
     @pytest.mark.asyncio
     async def test_jwt_drops_project_even_if_supplied(self, tmp_cache: Cache) -> None:
-        """A JWT client built with a stray project must NOT emit the Project header."""
-        client = ContreeClient(
-            "https://contree.dev", "jwt-token", cache=tmp_cache,
+        """A JWT profile with a stray project must not configure it."""
+        profile = ConfigProfile(
+            name="jwt",
+            url="https://contree.dev",
+            token="jwt-token",
             project="ignored-on-jwt",
             auth_type=AuthType.JWT,
         )
-        assert "Project" not in client.headers
+        client = ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
+        try:
+            assert client.client.project is None
+        finally:
+            await client.close()
 
     @pytest.mark.asyncio
     async def test_iam_emits_project_header(self, tmp_cache: Cache) -> None:
-        client = ContreeClient(
-            "https://api.tokenfactory.nebius.com/sandboxes",
-            "iam-token",
-            cache=tmp_cache,
+        profile = ConfigProfile(
+            name="iam",
+            url=Config.DEFAULT_IAM_URL,
+            token="iam-token",
             project="proj-123",
             auth_type=AuthType.IAM,
         )
-        assert client.headers["Authorization"] == "Bearer iam-token"
-        assert client.headers["Project"] == "proj-123"
+        client = ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
+        try:
+            headers = dict(client.client.build_headers(RequestSpec("GET", "/whoami")))
+            assert headers["Authorization"] == "Bearer iam-token"
+            assert headers["Project"] == "proj-123"
+        finally:
+            await client.close()
 
-    @pytest.mark.asyncio
-    async def test_iam_requires_project(self, tmp_cache: Cache) -> None:
+    def test_iam_requires_project(self, tmp_cache: Cache) -> None:
+        profile = ConfigProfile(
+            name="iam",
+            url=Config.DEFAULT_IAM_URL,
+            token="iam-token",
+            auth_type=AuthType.IAM,
+        )
         with pytest.raises(ValueError, match="IAM auth requires a project ID"):
-            ContreeClient(
-                "https://api.tokenfactory.nebius.com/sandboxes",
-                "iam-token",
-                cache=tmp_cache,
-                auth_type=AuthType.IAM,
-            )
+            ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
 
     @pytest.mark.asyncio
     async def test_from_profile_jwt(self, tmp_cache: Cache) -> None:
         profile = ConfigProfile(
             name="legacy",
-            url="https://contree.dev",
+            url="https://contree.dev/",
             token="jwt-token",
             auth_type=AuthType.JWT,
         )
-        client = ContreeClient.from_profile(profile, cache=tmp_cache)
-        assert client.auth_type == AuthType.JWT
-        assert "Project" not in client.headers
-        assert client.headers["Authorization"] == "Bearer jwt-token"
+        client = ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
+        try:
+            assert client.client.base_url == "https://contree.dev"
+            headers = dict(client.client.build_headers(RequestSpec("GET", "/whoami")))
+            assert headers["User-Agent"].startswith(MCP_USER_AGENT)
+            assert "contree-client/0.2.0" in headers["User-Agent"]
+        finally:
+            await client.close()
 
     @pytest.mark.asyncio
     async def test_from_profile_iam(self, tmp_cache: Cache) -> None:
         profile = ConfigProfile(
             name="prod",
-            url="https://api.tokenfactory.nebius.com/sandboxes",
+            url=Config.DEFAULT_IAM_URL,
             token="iam-token",
             auth_type=AuthType.IAM,
             project="proj-xyz",
         )
-        client = ContreeClient.from_profile(profile, cache=tmp_cache)
-        assert client.auth_type == AuthType.IAM
-        assert client.headers["Project"] == "proj-xyz"
+        client = ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
+        try:
+            assert client.client.project == "proj-xyz"
+        finally:
+            await client.close()
 
-    @pytest.mark.asyncio
-    async def test_from_profile_rejects_missing_token(self, tmp_cache: Cache) -> None:
+    def test_from_profile_rejects_missing_token(self, tmp_cache: Cache) -> None:
         profile = ConfigProfile(
             name="empty",
             url="https://contree.dev",
@@ -157,11 +204,9 @@ class TestContreeClientAuthType:
             auth_type=AuthType.JWT,
         )
         with pytest.raises(ValueError, match="has no token"):
-            ContreeClient.from_profile(profile, cache=tmp_cache)
+            ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
 
-    @pytest.mark.asyncio
-    async def test_from_profile_rejects_jwt_without_url(self, tmp_cache: Cache) -> None:
-        """JWT has no default URL — the legacy host must be supplied."""
+    def test_from_profile_rejects_jwt_without_url(self, tmp_cache: Cache) -> None:
         profile = ConfigProfile(
             name="bare-jwt",
             url="",
@@ -169,11 +214,10 @@ class TestContreeClientAuthType:
             auth_type=AuthType.JWT,
         )
         with pytest.raises(ValueError, match="no url"):
-            ContreeClient.from_profile(profile, cache=tmp_cache)
+            ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
 
     @pytest.mark.asyncio
     async def test_from_profile_iam_uses_default_url(self, tmp_cache: Cache) -> None:
-        """IAM profile without a URL falls back to ContreeClient.DEFAULT_URLS."""
         profile = ConfigProfile(
             name="bare-iam",
             url="",
@@ -181,30 +225,30 @@ class TestContreeClientAuthType:
             auth_type=AuthType.IAM,
             project="proj",
         )
-        client = ContreeClient.from_profile(profile, cache=tmp_cache)
-        # The client appends ``/v1`` to whatever base URL it receives.
-        assert client.base_url == ContreeClient.DEFAULT_URLS[AuthType.IAM] + "/v1"
+        client = ContreeClientAdapter.from_profile(profile, cache=tmp_cache)
+        try:
+            assert client.client.base_url == Config.DEFAULT_IAM_URL
+        finally:
+            await client.close()
 
 
-class TestListImages(TestCase):
+class TestListImages:
     """Tests for list_images method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(
-                body={
-                    "images": [
-                        make_image(uuid="img-1", tag="python:3.11").model_dump(),
-                        make_image(uuid="img-2", tag=None).model_dump(),
-                    ]
-                }
+    @pytest.fixture(autouse=True)
+    def mock_images(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "list_images",
+            ImageListResponse(
+                images=[
+                    make_image(uuid="img-1", tag="python:3.11"),
+                    make_image(uuid="img-2", tag=None),
+                ]
             ),
-        }
+        )
 
     @pytest.mark.asyncio
-    async def test_list_images_default(self, contree_client: ContreeClient):
-        """Test listing images with default parameters."""
+    async def test_list_images_default(self, contree_client: ContreeClientAdapter) -> None:
         images = await contree_client.list_images()
 
         assert len(images) == 2
@@ -213,53 +257,73 @@ class TestListImages(TestCase):
         assert images[1].tag is None
 
 
-class TestListImagesWithFilters(TestCase):
+class TestListImagesWithFilters:
     """Tests for list_images with filters."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(body={"images": []}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_images(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("list_images", ImageListResponse(images=[]))
 
     @pytest.mark.asyncio
-    async def test_list_images_with_filters(self, contree_client: ContreeClient):
-        """Test listing images with filters returns empty."""
+    async def test_list_images_with_filters(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         images = await contree_client.list_images(
             limit=50,
             offset=10,
             tagged=True,
-            tag_prefix="python",
+            tag_prefix="python:/",
             since="1h",
             until="1d",
         )
+
         assert images == []
-
-
-class TestImportImage(TestCase):
-    """Tests for import_image method."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-123"},
-                headers=(("Location", "/v1/operations/op-123"),),
-            ),
+        assert sdk_client_testing.calls_for("list_images")[0].kwargs == {
+            "limit": 50,
+            "offset": 10,
+            "tagged": True,
+            "tag": "python",
+            "since": "1h",
+            "until": "1d",
         }
 
     @pytest.mark.asyncio
-    async def test_import_image_basic(self, contree_client: ContreeClient):
-        """Test basic image import."""
+    async def test_list_images_unset_images_returns_empty(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock("list_images", ImageListResponse())
+        assert await contree_client.list_images() == []
+
+
+class TestImportImage:
+    """Tests for import_image method."""
+
+    @pytest.fixture(autouse=True)
+    def mock_import(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("import_image", "op-123")
+        sdk_client_testing.mock(
+            "wait_operation",
+            make_operation(uuid="op-123", kind="image_import", image="img-imported"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_import_image_basic(self, contree_client: ContreeClientAdapter) -> None:
         operation_id = await contree_client.import_image(registry_url="docker://docker.io/python:3.11-slim")
 
         assert operation_id == "op-123"
-        assert "op-123" in contree_client._tracked_operations
+        assert contree_client.is_tracked("op-123")
+        await contree_client.wait_for_operation(operation_id)
 
     @pytest.mark.asyncio
-    async def test_import_image_with_credentials(self, contree_client: ContreeClient):
-        """Test image import with registry credentials."""
+    async def test_import_image_with_credentials(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         operation_id = await contree_client.import_image(
             registry_url="docker://private.registry/image:tag",
             tag="myimage:v1",
@@ -268,583 +332,487 @@ class TestImportImage(TestCase):
         )
 
         assert operation_id == "op-123"
+        call = sdk_client_testing.calls_for("import_image")[0]
+        registry = call.args[0]
+        assert registry.url == "docker://private.registry/image:tag"
+        assert registry.credentials.username == "user"
+        assert registry.credentials.password == "pass"
+        assert call.kwargs == {"tag": "myimage:v1", "timeout": 300}
+        await contree_client.wait_for_operation(operation_id)
 
 
-class TestImportImageNoLocation(TestCase):
-    """Tests for import_image error when no Location header."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(http_status=HTTPStatus.ACCEPTED, body={"uuid": ""}),
-        }
+class TestImportImageNoLocation:
+    """Tests for import_image when the SDK returns no operation ID."""
 
     @pytest.mark.asyncio
-    async def test_import_image_no_location_header(self, contree_client: ContreeClient):
-        """Test import_image raises error when no Location header."""
-        with pytest.raises(ContreeError) as exc_info:
+    async def test_import_image_no_location_header(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock("import_image", "")
+
+        with pytest.raises(ContreeError, match="No operation ID"):
             await contree_client.import_image(registry_url="docker://test")
 
-        assert "No operation ID" in str(exc_info.value)
 
-
-class TestTagImage(TestCase):
+class TestTagImage:
     """Tests for tag_image and untag_image methods."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "PATCH /images/img-123/tag": FakeResponse(body=make_image(uuid="img-123", tag="myapp:v1").model_dump()),
-            "DELETE /images/img-123/tag": FakeResponse(body={}),
-            "GET /inspect/img-123/": FakeResponse(body=make_image(uuid="img-123", tag=None).model_dump()),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_images(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "update_image_tag",
+            make_image(uuid="img-123", tag="myapp:v1"),
+        )
+        sdk_client_testing.mock("delete_image_tag")
+        sdk_client_testing.mock(
+            "inspect_image",
+            make_image(uuid="img-123", tag=None),
+        )
 
     @pytest.mark.asyncio
-    async def test_tag_image(self, contree_client: ContreeClient):
-        """Test setting a tag on an image."""
+    async def test_tag_image(self, contree_client: ContreeClientAdapter) -> None:
         image = await contree_client.tag_image("img-123", "myapp:v1")
 
         assert image.uuid == "img-123"
         assert image.tag == "myapp:v1"
 
     @pytest.mark.asyncio
-    async def test_untag_image(self, contree_client: ContreeClient):
-        """Test removing a tag from an image."""
+    async def test_untag_image(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         image = await contree_client.untag_image("img-123")
 
         assert image.tag is None
+        assert sdk_client_testing.calls_for("delete_image_tag")[0].args == ("img-123",)
 
 
-class TestGetImage(TestCase):
+class TestGetImage:
     """Tests for get_image and get_image_by_tag methods."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/img-123/": FakeResponse(body=make_image(uuid="img-123", tag="test:latest").model_dump()),
-            "GET /inspect/": FakeResponse(body=make_image(uuid="img-456", tag="python:3.11").model_dump()),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_images(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_find_image_by_tag", "img-456")
 
     @pytest.mark.asyncio
-    async def test_get_image_by_uuid(self, contree_client: ContreeClient):
-        """Test getting image by UUID."""
+    async def test_get_image_by_uuid(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock(
+            "inspect_image",
+            make_image(uuid="img-123", tag="test:latest"),
+        )
         image = await contree_client.get_image("img-123")
-
         assert image.uuid == "img-123"
 
     @pytest.mark.asyncio
-    async def test_get_image_by_tag(self, contree_client: ContreeClient):
-        """Test getting image by tag."""
+    async def test_get_image_by_tag(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock(
+            "inspect_image",
+            make_image(uuid="img-456", tag="python:3.11"),
+        )
         image = await contree_client.get_image_by_tag("python:3.11")
 
+        assert image.uuid == "img-456"
         assert image.tag == "python:3.11"
 
 
-class TestListDirectory(TestCase):
+class TestListDirectory:
     """Tests for list_directory method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/img-123/list": FakeResponse(
-                body={
-                    "path": "/root",
-                    "files": [
-                        {
-                            "path": "file1.txt",
-                            "size": 100,
-                            "owner": 0,
-                            "group": 0,
-                            "mode": 0o644,
-                            "mtime": 1704067200,
-                            "is_dir": False,
-                            "is_regular": True,
-                            "is_symlink": False,
-                            "is_socket": False,
-                            "is_fifo": False,
-                            "symlink_to": "",
-                        },
-                    ],
-                }
+    @pytest.fixture(autouse=True)
+    def mock_directory(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "inspect_image_list",
+            DirectoryList(
+                path="/root",
+                files=[
+                    FileItem(
+                        path="file1.txt",
+                        size=100,
+                        owner=0,
+                        group=0,
+                        uid=0,
+                        gid=0,
+                        mode=0o644,
+                        mtime=1704067200,
+                        nlink=1,
+                        is_dir=False,
+                        is_regular=True,
+                        is_symlink=False,
+                        is_socket=False,
+                        is_fifo=False,
+                        symlink_to="",
+                    )
+                ],
             ),
-        }
+        )
 
     @pytest.mark.asyncio
-    async def test_list_directory(self, contree_client: ContreeClient):
-        """Test listing directory."""
+    async def test_list_directory(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         result = await contree_client.list_directory("img-123", "/root")
+        cached = await contree_client.list_directory("img-123", "root")
 
         assert isinstance(result, DirectoryList)
+        assert cached == result
         assert result.path == "/root"
         assert len(result.files) == 1
         assert result.files[0].path == "file1.txt"
+        assert len(sdk_client_testing.calls_for("inspect_image_list")) == 1
 
 
-class TestReadFile(TestCase):
+class TestListDirectoryText:
+    """Tests for the backend's ls-like text format."""
+
+    @pytest.mark.asyncio
+    async def test_list_directory_text(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        specs: list[RequestSpec] = []
+
+        async def stream(
+            spec: RequestSpec,
+            auto_decompress: bool = True,
+        ) -> AsyncIterator[bytes]:
+            del auto_decompress
+            specs.append(spec)
+            yield b"total 1\n-rw-r--r-- file\n"
+
+        sdk_client_testing.stream = stream  # type: ignore[method-assign]
+        result = await contree_client.list_directory_text("img-123", "root")
+        cached = await contree_client.list_directory_text("img-123", "/root")
+
+        assert result == cached
+        assert specs[0].path == "/inspect/img-123/list"
+        assert specs[0].query == {"path": "/root", "text": ""}
+        assert len(specs) == 1
+
+
+class TestReadFile:
     """Tests for read_file method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/img-123/download": FakeResponse(body="file content here"),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_file(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_image_download", b"file content here")
 
     @pytest.mark.asyncio
-    async def test_read_file(self, contree_client: ContreeClient):
-        """Test reading file."""
+    async def test_read_file(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         content = await contree_client.read_file("img-123", "/etc/passwd")
+        cached = await contree_client.read_file("img-123", "/etc/passwd")
 
-        # Returns bytes from streaming
-        assert isinstance(content, bytes)
+        assert content == cached == b"file content here"
+        assert len(sdk_client_testing.calls_for("inspect_image_download")) == 1
 
 
-class TestFileExists(TestCase):
+class TestStreamFile:
+    """Tests for streaming downloads."""
+
+    @pytest.fixture(autouse=True)
+    def mock_stream(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_image_download_stream", [b"abcdef", b"gh"])
+
+    @pytest.mark.asyncio
+    async def test_stream_file_respects_chunk_size(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        async with contree_client.stream_file("img-123", "/file", chunk_size=2) as source:
+            chunks = [chunk async for chunk in source]
+        assert chunks == [b"ab", b"cd", b"ef", b"gh"]
+
+    @pytest.mark.asyncio
+    async def test_stream_file_rejects_invalid_chunk_size(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        with pytest.raises(ValueError, match="chunk_size must be positive"):
+            async with contree_client.stream_file("img-123", "/file", chunk_size=0):
+                pass
+
+
+class TestFileExists:
     """Tests for file_exists method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "HEAD /inspect/img-123/download": FakeResponse(http_status=HTTPStatus.OK),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_exists(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("check_image_file", True)
 
     @pytest.mark.asyncio
-    async def test_file_exists_true(self, contree_client: ContreeClient):
-        """Test file exists returns True."""
-        exists = await contree_client.file_exists("img-123", "/bin/bash")
+    async def test_file_exists_true(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        assert await contree_client.file_exists("img-123", "/bin/bash") is True
+        assert await contree_client.file_exists("img-123", "/bin/bash") is True
+        assert len(sdk_client_testing.calls_for("check_image_file")) == 1
 
-        assert exists is True
 
+class TestFileExistsFalse:
+    """Tests for file_exists returning False."""
 
-class TestFileExistsFalse(TestCase):
-    """Tests for file_exists returns False."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "HEAD /inspect/img-123/download": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_exists(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("check_image_file", False)
 
     @pytest.mark.asyncio
-    async def test_file_exists_false(self, contree_client: ContreeClient):
-        """Test file exists returns False for 404."""
-        exists = await contree_client.file_exists("img-123", "/nonexistent")
-
-        assert exists is False
+    async def test_file_exists_false(self, contree_client: ContreeClientAdapter) -> None:
+        assert await contree_client.file_exists("img-123", "/nonexistent") is False
 
 
-class TestUploadFile(TestCase):
+class TestUploadFile:
     """Tests for upload_file method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body={"uuid": "file-123", "sha256": "abc123"}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_upload(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "missing"))
+        sdk_client_testing.mock(
+            "upload_file",
+            FileResponse(uuid="file-123", sha256="abc123", size=11),
+        )
 
     @pytest.mark.asyncio
-    async def test_upload_file_bytes(self, contree_client: ContreeClient):
-        """Test uploading file from bytes."""
+    async def test_upload_file_bytes(self, contree_client: ContreeClientAdapter) -> None:
         result = await contree_client.upload_file(b"hello world")
 
         assert result.uuid == "file-123"
         assert result.sha256 == "abc123"
 
     @pytest.mark.asyncio
-    async def test_upload_file_like_object(self, contree_client: ContreeClient):
-        """Test uploading from file-like object."""
-        file_like = io.BytesIO(b"test content")
-
-        result = await contree_client.upload_file(file_like)
-
+    async def test_upload_file_like_object(self, contree_client: ContreeClientAdapter) -> None:
+        result = await contree_client.upload_file(io.BytesIO(b"test content"))
         assert result.uuid == "file-123"
 
 
-class TestListOperations(TestCase):
+class TestListOperations:
     """Tests for list_operations method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations": FakeResponse(
-                body={
-                    "operations": [
-                        {
-                            "uuid": "op-1",
-                            "kind": "instance",
-                            "status": "SUCCESS",
-                            "created_at": "2024-01-01T00:00:00Z",
-                        },
-                    ]
-                }
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operations(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "list_operations",
+            [
+                OperationSummary(
+                    uuid="op-1",
+                    kind="instance",
+                    status=OperationStatus.SUCCESS,
+                    error=None,
+                    created_at="2024-01-01T00:00:00Z",
+                )
+            ],
+        )
 
     @pytest.mark.asyncio
-    async def test_list_operations_default(self, contree_client: ContreeClient):
-        """Test listing operations with defaults."""
+    async def test_list_operations_default(self, contree_client: ContreeClientAdapter) -> None:
         operations = await contree_client.list_operations()
 
         assert len(operations) == 1
         assert operations[0].uuid == "op-1"
-        assert operations[0].kind == OperationKind.INSTANCE
+        assert operations[0].kind == "instance"
         assert operations[0].status == OperationStatus.SUCCESS
 
 
-class TestListOperationsWithFilters(TestCase):
+class TestListOperationsWithFilters:
     """Tests for list_operations with filters."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations": FakeResponse(body={"operations": []}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operations(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("list_operations", [])
 
     @pytest.mark.asyncio
-    async def test_list_operations_with_filters(self, contree_client: ContreeClient):
-        """Test listing operations with filters."""
-        await contree_client.list_operations(
+    async def test_list_operations_with_filters(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        operations = await contree_client.list_operations(
             limit=50,
+            offset=10,
             status=OperationStatus.EXECUTING,
-            kind=OperationKind.IMAGE_IMPORT,
-            since="1h",
+            kind="image_import",
+            since="2h",
+            until="1h",
         )
-        # Just verify it doesn't error - the filters are handled by server
+
+        assert operations == []
+        assert sdk_client_testing.calls_for("list_operations")[0].kwargs == {
+            "limit": 50,
+            "offset": 10,
+            "status": OperationStatus.EXECUTING,
+            "kind": "image_import",
+            "since": "2h",
+            "until": "1h",
+        }
 
 
-class TestListOperationsListFormat(TestCase):
-    """Tests for list_operations with list response format."""
+class TestWhoAmI:
+    """Tests for whoami method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        # Using dict wrapper with "operations" key to match client expectation
-        return {
-            "GET /operations": FakeResponse(
-                body={
-                    "operations": [
-                        {
-                            "uuid": "op-1",
-                            "kind": "instance",
-                            "status": "SUCCESS",
-                            "created_at": "2024-01-01T00:00:00Z",
-                        }
-                    ]
-                }
+    @pytest.fixture(autouse=True)
+    def mock_whoami(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "whoami",
+            WhoAmIResponse(
+                token_uuid="token-1",
+                token_expiration=None,
+                permissions={"spawn": True},
+                limits={"instance_max_timeout": 300},
+                operations_stat={},
             ),
-        }
+        )
 
     @pytest.mark.asyncio
-    async def test_list_operations_list_format(self, contree_client: ContreeClient):
-        """Test list_operations with dict response format."""
-        operations = await contree_client.list_operations()
-
-        assert len(operations) == 1
-        assert operations[0].uuid == "op-1"
+    async def test_whoami(self, contree_client: ContreeClientAdapter) -> None:
+        result = await contree_client.whoami()
+        assert result.permissions == {"spawn": True}
 
 
-class TestGetOperation(TestCase):
-    """Tests for get_operation method."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "instance",
-                    "status": "SUCCESS",
-                    "metadata": {
-                        "command": "echo hello",
-                        "image": "img-1",
-                        "result": {
-                            "state": {"exit_code": 0, "pid": 1, "timed_out": False},
-                            "stdout": {"value": "hello", "encoding": "ascii"},
-                            "stderr": {"value": "", "encoding": "ascii"},
-                            "resources": {"elapsed_time": 1.5},
-                        },
-                    },
-                    "result": {"image": "img-result", "tag": None},
-                }
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_operation_instance(self, contree_client: ContreeClient):
-        """Test getting instance operation with metadata."""
-        result = await contree_client.get_operation("op-123")
-
-        assert result.uuid == "op-123"
-        assert result.status == OperationStatus.SUCCESS
-        assert result.metadata.result.state.exit_code == 0
-        assert result.metadata.result.stdout.value == "hello"
-        assert result.result.image == "img-result"
-
-
-class TestGetOperationImageImport(TestCase):
-    """Tests for get_operation with image import."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-456": FakeResponse(
-                body={
-                    "uuid": "op-456",
-                    "kind": "image_import",
-                    "status": "SUCCESS",
-                    "metadata": {
-                        "registry": {"url": "docker://test"},
-                        "tag": "imported:v1",
-                        "timeout": 300,
-                    },
-                    "result": {"image": "img-imported", "tag": "imported:v1"},
-                }
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_operation_image_import(self, contree_client: ContreeClient):
-        """Test getting image import operation."""
-        result = await contree_client.get_operation("op-456")
-
-        assert result.kind == OperationKind.IMAGE_IMPORT
-        assert result.result.image == "img-imported"
-        assert result.result.tag == "imported:v1"
-
-
-class TestGetOperationParseError(TestCase):
-    """Tests for get_operation parse error."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(body={"invalid": "data"}),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_operation_parse_error(self, contree_client: ContreeClient):
-        """Test get_operation with malformed response raises ContreeError."""
-        from contree_mcp.client import ContreeError
-
-        with pytest.raises(ContreeError, match="invalid JSON"):
-            await contree_client.get_operation("op-123")
-
-
-class TestGetOperationImageImportMetadata(TestCase):
-    """Tests for get_operation with image import metadata."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "image_import",
-                    "status": "SUCCESS",
-                    "metadata": {
-                        "registry": {"url": "docker://test"},
-                        "tag": "test:v1",
-                        "timeout": 300,
-                    },
-                    "result": {"image": "img-123"},
-                }
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_operation_with_import_metadata(self, contree_client: ContreeClient):
-        """Test get_operation with image import metadata."""
-        result = await contree_client.get_operation("op-123")
-
-        assert result.metadata.registry.url == "docker://test"
-        assert result.metadata.tag == "test:v1"
-
-
-class TestGetOperationInstanceNoResult(TestCase):
-    """Tests for get_operation for instance with no result in metadata."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "instance",
-                    "status": "PENDING",
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_operation_instance_no_result_in_metadata(self, contree_client: ContreeClient):
-        """Test get_operation for instance with no result in metadata."""
-        result = await contree_client.get_operation("op-123")
-
-        assert result.metadata is None
-
-
-class TestCancelOperation(TestCase):
+class TestCancelOperation:
     """Tests for cancel_operation method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "instance",
-                    "status": "EXECUTING",
-                    "created_at": "2024-01-01T00:00:00Z",
-                }
-            ),
-            "DELETE /operations/op-123": FakeResponse(body={"uuid": "op-123", "status": "CANCELLED"}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-123", status=OperationStatus.EXECUTING, image=None),
+        )
+        sdk_client_testing.mock("cancel_operation")
 
     @pytest.mark.asyncio
-    async def test_cancel_operation_success(self, contree_client: ContreeClient):
-        """Test successfully cancelling an operation."""
+    async def test_cancel_operation_success(self, contree_client: ContreeClientAdapter) -> None:
         result = await contree_client.cancel_operation("op-123")
-
         assert result == OperationStatus.CANCELLED
 
 
-class TestCancelOperationOtherError(TestCase):
-    """Tests for cancel_operation with other error."""
+class TestCancelOperationOtherError:
+    """Tests for cancel_operation with another API error."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "instance",
-                    "status": "EXECUTING",
-                    "created_at": "2024-01-01T00:00:00Z",
-                }
-            ),
-            "DELETE /operations/op-123": FakeResponse(http_status=HTTPStatus.INTERNAL_SERVER_ERROR),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-123", status=OperationStatus.EXECUTING, image=None),
+        )
+        sdk_client_testing.mock(
+            "cancel_operation",
+            error=ContreeAPIError(500, "server error"),
+        )
 
     @pytest.mark.asyncio
-    async def test_cancel_operation_other_error(self, contree_client: ContreeClient):
-        """Test cancel_operation raises other errors."""
-        with pytest.raises(ContreeError) as exc_info:
+    async def test_cancel_operation_other_error(self, contree_client: ContreeClientAdapter) -> None:
+        with pytest.raises(ContreeAPIError) as exc_info:
             await contree_client.cancel_operation("op-123")
+        assert exc_info.value.status == 500
 
-        assert exc_info.value.status_code == 500
 
-
-class TestWaitForOperation(TestCase):
+class TestWaitForOperation:
     """Tests for wait_for_operation method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "instance",
-                    "status": "SUCCESS",
-                    "metadata": {
-                        "command": "echo done",
-                        "image": "img-1",
-                        "result": {
-                            "state": {"exit_code": 0, "pid": 1, "timed_out": False},
-                            "stdout": {"value": "done", "encoding": "ascii"},
-                            "stderr": {"value": "", "encoding": "ascii"},
-                            "resources": {"elapsed_time": 1.0},
-                        },
-                    },
-                    "result": {"image": "img-result"},
-                }
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-123", status=OperationStatus.SUCCESS),
+        )
 
     @pytest.mark.asyncio
-    async def test_wait_for_operation_immediate_success(self, contree_client: ContreeClient):
-        """Test waiting for operation that's already complete."""
+    async def test_wait_for_operation_immediate_success(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
         result = await contree_client.wait_for_operation("op-123")
-
         assert result.status == OperationStatus.SUCCESS
 
 
-class TestRunCommand(TestCase):
-    """Tests for run_command method."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-123"},
-                headers=(("Location", "/v1/operations/op-123"),),
-            ),
-            "GET /operations/op-123": FakeResponse(
-                body={
-                    "uuid": "op-123",
-                    "kind": "instance",
-                    "status": "SUCCESS",
-                    "metadata": {
-                        "command": "echo hello",
-                        "image": "img-123",
-                        "result": {
-                            "state": {"exit_code": 0, "pid": 1, "timed_out": False},
-                            "stdout": {"value": "hello", "encoding": "ascii"},
-                            "stderr": {"value": "", "encoding": "ascii"},
-                            "resources": {"elapsed_time": 0.5},
-                        },
-                    },
-                    "result": {"image": "img-result"},
-                }
-            ),
-        }
-
-
-class TestSpawnInstance(TestCase):
+class TestSpawnInstance:
     """Tests for spawn_instance method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-123"},
-                headers=(("Location", "/v1/operations/op-123"),),
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_spawn(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-123"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            make_operation(uuid="op-123", image="img-result"),
+        )
 
     @pytest.mark.asyncio
-    async def test_spawn_instance_basic(self, contree_client: ContreeClient):
-        """Test basic instance spawning."""
+    async def test_spawn_instance_basic(self, contree_client: ContreeClientAdapter) -> None:
         operation_id = await contree_client.spawn_instance(
             command="echo hello",
             image="img-123",
         )
 
         assert operation_id == "op-123"
-        assert "op-123" in contree_client._tracked_operations
+        assert contree_client.is_tracked("op-123")
+        await contree_client.wait_for_operation(operation_id)
 
     @pytest.mark.asyncio
-    async def test_spawn_instance_with_options(self, contree_client: ContreeClient):
-        """Test spawning instance with all options."""
+    async def test_spawn_instance_with_options(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         operation_id = await contree_client.spawn_instance(
             command="python script.py",
             image="img-123",
             shell=False,
             args=["--verbose"],
-            env={"FOO": "bar"},
+            env={"FOO": "bar", "OPTIONAL": None},
+            preserve_env=True,
             cwd="/app",
+            uid=1000,
+            gid=1000,
             timeout=60,
             hostname="myhost",
             disposable=False,
             stdin="input data",
+            truncate_output_at=2048,
+            max_layer_bytes=4096,
         )
 
         assert operation_id == "op-123"
+        call = sdk_client_testing.calls_for("spawn_instance")[0]
+        assert call.args == ("python script.py", "img-123")
+        assert call.kwargs["shell"] is False
+        assert call.kwargs["args"] == ["--verbose"]
+        assert call.kwargs["env"] == {"FOO": "bar", "OPTIONAL": None}
+        assert call.kwargs["preserve_env"] is True
+        assert call.kwargs["cwd"] == "/app"
+        assert call.kwargs["uid"] == 1000
+        assert call.kwargs["gid"] == 1000
+        assert call.kwargs["timeout"] == 60
+        assert call.kwargs["hostname"] == "myhost"
+        assert call.kwargs["disposable"] is False
+        assert call.kwargs["stdin"].value == "input data"
+        assert call.kwargs["truncate_output_at"] == 2048
+        assert call.kwargs["resources_limits"].max_layer_bytes == 4096
+        await contree_client.wait_for_operation(operation_id)
 
     @pytest.mark.asyncio
-    async def test_spawn_instance_with_files(self, contree_client: ContreeClient):
-        """Test spawning instance with files."""
+    async def test_spawn_instance_with_files(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         operation_id = await contree_client.spawn_instance(
             command="cat /input.txt",
             image="img-123",
@@ -852,703 +820,487 @@ class TestSpawnInstance(TestCase):
         )
 
         assert operation_id == "op-123"
+        file_spec = sdk_client_testing.calls_for("spawn_instance")[0].kwargs["files"]["/input.txt"]
+        assert file_spec.uuid == "file-123"
+        assert file_spec.mode == "0644"
+        await contree_client.wait_for_operation(operation_id)
 
 
-class TestSpawnInstanceNoLocation(TestCase):
-    """Tests for spawn_instance when no Location header."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(http_status=HTTPStatus.ACCEPTED, body={"uuid": ""}),
-        }
+class TestSpawnInstanceNoLocation:
+    """Tests for spawn_instance when the SDK response has no operation ID."""
 
     @pytest.mark.asyncio
-    async def test_spawn_instance_no_location_header(self, contree_client: ContreeClient):
-        """Test spawn_instance raises error when no Location header."""
-        with pytest.raises(ContreeError) as exc_info:
+    async def test_spawn_instance_no_location_header(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid=""))
+
+        with pytest.raises(ContreeError, match="No operation ID"):
             await contree_client.spawn_instance(command="echo", image="img-123")
 
-        assert "No operation ID" in str(exc_info.value)
 
-
-class TestContextManager(TestCase):
-    """Tests for async context manager."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {}
+class TestContextManager:
+    """Tests for the adapter's async context manager."""
 
     @pytest.mark.asyncio
-    async def test_context_manager(self, fake_server_url: str, tmp_cache: Cache) -> None:
-        """Test client works as async context manager."""
-        async with ContreeClient(base_url=fake_server_url, token="test-token", cache=tmp_cache) as client:
-            assert client is not None
+    async def test_context_manager(
+        self,
+        tmp_cache: Cache,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.open = AsyncMock()  # type: ignore[method-assign]
+        sdk_client_testing.close = AsyncMock()  # type: ignore[method-assign]
+        adapter = ContreeClientAdapter(cache=tmp_cache, client=sdk_client_testing)
 
-        # After exiting, session should be cleaned up (removed from __dict__)
-        assert "session" not in client.__dict__
+        async with adapter as client:
+            assert client is adapter
 
-
-class TestCancelIncompleteOperations(TestCase):
-    """Tests for cancel_incomplete_operations method."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-1": FakeResponse(
-                body={
-                    "uuid": "op-1",
-                    "kind": "instance",
-                    "status": "EXECUTING",
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-            "DELETE /operations/op-1": FakeResponse(body={"uuid": "op-1", "status": "CANCELLED"}),
-        }
-
-    @pytest.mark.asyncio
-    async def test_cancel_incomplete_operations(self, contree_client: ContreeClient):
-        """Test cancelling incomplete operations."""
-        # Simulate tracked operations
-        contree_client._track_operation("op-1", kind="instance")
-
-        await contree_client.cancel_incomplete_operations()
-
-        # Should not raise
+        sdk_client_testing.open.assert_awaited_once()
+        sdk_client_testing.close.assert_awaited_once()
 
 
-class TestCancelIncompleteOperationsWithError(TestCase):
-    """Tests for cancel_incomplete_operations error handling."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-1": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
-        }
-
-    @pytest.mark.asyncio
-    async def test_cancel_with_exception(self, contree_client: ContreeClient):
-        """Test cancel_incomplete_operations handles exceptions."""
-        # Simulate tracked operation
-        contree_client._track_operation("op-1", kind="instance")
-
-        # Should not raise even if get_operation fails
-        await contree_client.cancel_incomplete_operations()
-
-
-class TestStream:
-    """Tests for Stream class."""
-
-    def test_text_ascii(self):
-        """Test getting text from ASCII content."""
-        stream = Stream(value="hello world", encoding="ascii")
-        assert stream.text() == "hello world"
-
-    def test_text_base64(self):
-        """Test getting text from base64 content."""
-        encoded = base64.b64encode(b"hello world").decode()
-        stream = Stream(value=encoded, encoding="base64")
-        assert stream.text() == "hello world"
-
-
-class TestContreeError:
-    """Tests for ContreeError exception."""
-
-    def test_error_with_status_code(self):
-        """Test error with status code."""
-        error = ContreeError("Not found", status_code=404)
-        assert error.message == "Not found"
-        assert error.status_code == 404
-        assert str(error) == "Not found"
-
-    def test_error_without_status_code(self):
-        """Test error without status code."""
-        error = ContreeError("Something went wrong")
-        assert error.message == "Something went wrong"
-        assert error.status_code is None
-
-
-class TestCheckFileExistsByHash(TestCase):
+class TestCheckFileExistsByHash:
     """Tests for check_file_exists_by_hash method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "HEAD /files/{sha256}": FakeResponse(http_status=HTTPStatus.OK),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_exists(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("check_file_exists", True)
 
     @pytest.mark.asyncio
-    async def test_check_file_exists_by_hash_true(self, contree_client: ContreeClient):
-        """Test file exists by hash returns True."""
-        exists = await contree_client.check_file_exists_by_hash("abc123")
-        assert exists is True
+    async def test_check_file_exists_by_hash_true(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        assert await contree_client.check_file_exists_by_hash("abc123") is True
 
 
-class TestCheckFileExistsByHashNotFound(TestCase):
-    """Tests for check_file_exists_by_hash returns False on 404."""
+class TestCheckFileExistsByHashNotFound:
+    """Tests for check_file_exists_by_hash returning False."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "HEAD /files/{sha256}": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
-        }
-
-    @pytest.mark.asyncio
-    async def test_check_file_exists_by_hash_not_found(self, contree_client: ContreeClient):
-        """Test file exists by hash returns False for 404."""
-        exists = await contree_client.check_file_exists_by_hash("nonexistent")
-        assert exists is False
-
-
-class TestCheckFileExistsByHashException(TestCase):
-    """Tests for check_file_exists_by_hash returns False on server error."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "HEAD /files/{sha256}": FakeResponse(http_status=HTTPStatus.INTERNAL_SERVER_ERROR),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_exists(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("check_file_exists", False)
 
     @pytest.mark.asyncio
-    async def test_check_file_exists_by_hash_on_exception(self, contree_client: ContreeClient):
-        """Test check_file_exists_by_hash returns False on exception."""
-        exists = await contree_client.check_file_exists_by_hash("abc123")
-        assert exists is False
+    async def test_check_file_exists_by_hash_not_found(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        assert await contree_client.check_file_exists_by_hash("nonexistent") is False
 
 
-class TestGetFileByHash(TestCase):
+class TestCheckFileExistsByHashException:
+    """Tests for check_file_exists_by_hash error propagation."""
+
+    @pytest.fixture(autouse=True)
+    def mock_error(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "check_file_exists",
+            error=ContreeAPIError(500, "server error"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_check_file_exists_by_hash_on_exception(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        with pytest.raises(ContreeAPIError):
+            await contree_client.check_file_exists_by_hash("abc123")
+
+
+class TestGetFileByHash:
     """Tests for get_file_by_hash method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /files/{sha256}": FakeResponse(body={"uuid": "file-123", "sha256": "abc123"}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_file(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_file",
+            make_file(uuid="file-123", sha256="abc123"),
+        )
 
     @pytest.mark.asyncio
-    async def test_get_file_by_hash_found(self, contree_client: ContreeClient):
-        """Test getting file by hash when found."""
+    async def test_get_file_by_hash_found(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         result = await contree_client.get_file_by_hash("abc123")
+        cached = await contree_client.get_file_by_hash("abc123")
 
         assert result is not None
+        assert cached == result
         assert result.uuid == "file-123"
         assert result.sha256 == "abc123"
+        assert len(sdk_client_testing.calls_for("get_file")) == 1
 
 
-class TestGetFileByHashListShape(TestCase):
-    """Regression: backend wraps in {files:[…]}; client still parses."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /files/{sha256}": FakeResponse(
-                body={
-                    "files": [
-                        {
-                            "uuid": "file-456",
-                            "sha256": "deadbeef",
-                            "size": 12,
-                            "created_at": "2026-05-18T09:16:55Z",
-                            "updated_at": "2026-05-18T09:16:55Z",
-                            "future_field": "ignored",
-                        }
-                    ]
-                }
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_file_by_hash_unwraps_list_envelope(self, contree_client: ContreeClient):
-        result = await contree_client.get_file_by_hash("deadbeef")
-        assert result is not None
-        assert result.uuid == "file-456"
-        assert result.sha256 == "deadbeef"
-
-
-class TestGetFileByHashAdditiveFields(TestCase):
-    """Regression: unknown additive fields are ignored, not fatal."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /files/{sha256}": FakeResponse(
-                body={
-                    "uuid": "file-789",
-                    "sha256": "cafebabe",
-                    "size": 7,
-                    "stored_in": "s3://bucket/key",
-                    "metadata": {"owner": "someone"},
-                }
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_get_file_by_hash_ignores_unknown_fields(self, contree_client: ContreeClient):
-        result = await contree_client.get_file_by_hash("cafebabe")
-        assert result is not None
-        assert result.uuid == "file-789"
-
-
-class TestGetFileByHashNotFound(TestCase):
+class TestGetFileByHashNotFound:
     """Tests for get_file_by_hash when not found."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /files/{sha256}": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_missing(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "missing"))
 
     @pytest.mark.asyncio
-    async def test_get_file_by_hash_not_found(self, contree_client: ContreeClient):
-        """Test getting file by hash when not found."""
+    async def test_get_file_by_hash_not_found(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         result = await contree_client.get_file_by_hash("nonexistent")
+        cached = await contree_client.get_file_by_hash("nonexistent")
 
         assert result is None
+        assert cached is None
+        assert len(sdk_client_testing.calls_for("get_file")) == 1
 
 
-class TestGetFileByHashOtherError(TestCase):
-    """Tests for get_file_by_hash with other error."""
+class TestGetFileByHashOtherError:
+    """Tests for get_file_by_hash with another API error."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /files/{sha256}": FakeResponse(http_status=HTTPStatus.INTERNAL_SERVER_ERROR),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_error(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_file",
+            error=ContreeAPIError(500, "server error"),
+        )
 
     @pytest.mark.asyncio
-    async def test_get_file_by_hash_other_error(self, contree_client: ContreeClient):
-        """Test getting file by hash with other error."""
-        with pytest.raises(ContreeError) as exc_info:
+    async def test_get_file_by_hash_other_error(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        with pytest.raises(ContreeAPIError) as exc_info:
             await contree_client.get_file_by_hash("abc123")
+        assert exc_info.value.status == 500
 
-        assert exc_info.value.status_code == 500
 
-
-class TestResolveImage(TestCase):
+class TestResolveImage:
     """Tests for resolve_image method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/": FakeResponse(body=make_image(uuid="resolved-uuid", tag="python:3.11").model_dump()),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_image(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_find_image_by_tag", "resolved-uuid")
+        sdk_client_testing.mock(
+            "inspect_image",
+            make_image(uuid="resolved-uuid", tag="python:3.11"),
+        )
 
     @pytest.mark.asyncio
-    async def test_resolve_image_by_tag(self, contree_client: ContreeClient):
-        """Test resolving image by tag."""
+    async def test_resolve_image_by_tag(self, contree_client: ContreeClientAdapter) -> None:
         result = await contree_client.resolve_image("tag:python:3.11")
-
         assert result == "resolved-uuid"
 
     @pytest.mark.asyncio
-    async def test_resolve_image_by_uuid(self, contree_client: ContreeClient):
-        """Test resolving image by UUID (passthrough)."""
+    async def test_resolve_image_by_uuid(self, contree_client: ContreeClientAdapter) -> None:
         test_uuid = "12345678-1234-5678-1234-567812345678"
-        result = await contree_client.resolve_image(test_uuid)
-
-        # UUID is returned as-is
-        assert result == test_uuid
-
-
-class TestImportImageWithTimeout(TestCase):
-    """Tests for import_image with timeout parameter."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-123"},
-                headers=(("Location", "/v1/operations/op-123"),),
-            ),
-        }
+        assert await contree_client.resolve_image(test_uuid) == test_uuid
 
     @pytest.mark.asyncio
-    async def test_import_image_with_timeout(self, contree_client: ContreeClient):
-        """Test import_image with timeout."""
+    async def test_resolve_image_rejects_bare_tag(
+        self,
+        contree_client: ContreeClientAdapter,
+    ) -> None:
+        with pytest.raises(ContreeError, match="Use UUID or 'tag:name'"):
+            await contree_client.resolve_image("python:3.11")
+
+
+class TestImportImageWithTimeout:
+    """Tests for import_image with timeout parameter."""
+
+    @pytest.fixture(autouse=True)
+    def mock_import(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("import_image", "op-123")
+        sdk_client_testing.mock(
+            "wait_operation",
+            make_operation(uuid="op-123", kind="image_import", image="img-imported"),
+        )
+
+    @pytest.mark.asyncio
+    async def test_import_image_with_timeout(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         operation_id = await contree_client.import_image(
             registry_url="docker://test",
             timeout=120,
         )
 
         assert operation_id == "op-123"
+        assert sdk_client_testing.calls_for("import_image")[0].kwargs["timeout"] == 120
+        await contree_client.wait_for_operation(operation_id)
 
 
-class TestListOperationsUntil(TestCase):
+class TestListOperationsUntil:
     """Tests for list_operations with until parameter."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations": FakeResponse(body={"operations": []}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operations(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("list_operations", [])
 
     @pytest.mark.asyncio
-    async def test_list_operations_with_until(self, contree_client: ContreeClient):
-        """Test list_operations with until parameter."""
+    async def test_list_operations_with_until(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         await contree_client.list_operations(until="2024-12-31T23:59:59Z")
-        # Just verify it doesn't error
+        assert sdk_client_testing.calls_for("list_operations")[0].kwargs["until"] == "2024-12-31T23:59:59Z"
 
 
-class TestReadFileBinary(TestCase):
-    """Tests for read_file method with binary content."""
+class TestReadFileBinary:
+    """Tests for read_file with binary content."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/img-123/download": FakeResponse(body=b"\x00\x01\x02\x03binary"),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_file(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("inspect_image_download", b"\x00\x01\x02\x03binary")
 
     @pytest.mark.asyncio
-    async def test_read_file_binary(self, contree_client: ContreeClient):
-        """Test reading file returns bytes."""
+    async def test_read_file_binary(self, contree_client: ContreeClientAdapter) -> None:
         content = await contree_client.read_file("img-123", "/bin/executable")
-        assert isinstance(content, bytes)
+        assert content == b"\x00\x01\x02\x03binary"
 
 
-class TestFileExistsException(TestCase):
-    """Tests for file_exists when an exception occurs."""
+class TestFileExistsException:
+    """Tests for file_exists error propagation."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "HEAD /inspect/img-123/download": FakeResponse(http_status=HTTPStatus.INTERNAL_SERVER_ERROR),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_error(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "check_image_file",
+            error=ContreeAPIError(500, "server error"),
+        )
 
     @pytest.mark.asyncio
-    async def test_file_exists_on_exception(self, contree_client: ContreeClient):
-        """Test file_exists returns False on exception."""
-        exists = await contree_client.file_exists("img-123", "/some/path")
-        assert exists is False
+    async def test_file_exists_on_exception(self, contree_client: ContreeClientAdapter) -> None:
+        with pytest.raises(ContreeAPIError):
+            await contree_client.file_exists("img-123", "/some/path")
 
 
-class TestWaitForOperationTimeout(TestCase):
+class TestWaitForOperationTimeout:
     """Tests for wait_for_operation with timeout."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/op-slow": FakeResponse(
-                body={
-                    "uuid": "op-slow",
-                    "kind": "instance",
-                    "status": "EXECUTING",
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-            "DELETE /operations/op-slow": FakeResponse(body={"uuid": "op-slow", "status": "CANCELLED"}),
-        }
-
-    @pytest.mark.asyncio
-    async def test_wait_for_operation_timeout(self, contree_client: ContreeClient):
-        """Test wait_for_operation times out."""
-        with pytest.raises(ContreeError) as exc_info:
-            await contree_client.wait_for_operation("op-slow", max_wait=0.1)
-
-        assert "timed out" in str(exc_info.value).lower()
-
-
-class TestCloseWithTrackedOperationsCancelError(TestCase):
-    """Tests for close() when cancel fails."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-tracked"},
-                headers=(("Location", "/v1/operations/op-tracked"),),
-            ),
-            "GET /operations/op-tracked": FakeResponse(
-                body={
-                    "uuid": "op-tracked",
-                    "kind": "image_import",
-                    "status": "EXECUTING",
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-            "DELETE /operations/op-tracked": FakeResponse(http_status=HTTPStatus.INTERNAL_SERVER_ERROR),
-        }
-
-    @pytest.mark.asyncio
-    async def test_close_with_cancel_error(self, contree_client: ContreeClient):
-        """Test close() handles cancel errors gracefully."""
-        # Track an operation
-        await contree_client.import_image(registry_url="docker://test")
-        assert "op-tracked" in contree_client._tracked_operations
-
-        # Close should not raise even if cancel fails
-        await contree_client.close()
-        assert "session" not in contree_client.__dict__
-
-
-# =============================================================================
-# SSE events mechanism
-# =============================================================================
-
-
-async def sse_lines(text: str) -> AsyncIterator[str]:
-    for line in text.splitlines():
-        yield line
-
-
-async def collect_events(text: str) -> list[dict]:
-    return [event async for event in iter_sse_events(sse_lines(text))]
-
-
-def operation_body(uuid: str, status: str) -> dict:
-    return {
-        "uuid": uuid,
-        "kind": "instance",
-        "status": status,
-        "error": None,
-        "metadata": None,
-        "result": {"image": "img-result", "tag": None} if status == "SUCCESS" else None,
-    }
-
-
-class TestIterSSEEvents:
-    """Unit tests for the SSE frame parser."""
-
-    @pytest.mark.asyncio
-    async def test_normal_frame(self):
-        events = await collect_events(
-            'id: 1\nevent: stdout\ndata: {"id": 1, "type": "stdout", "data": {"value": "hi", "encoding": "ascii"}}\n\n'
+    @pytest.fixture(autouse=True)
+    def mock_operation(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-slow", status=OperationStatus.EXECUTING, image=None),
         )
-        assert events == [{"id": 1, "type": "stdout", "data": {"value": "hi", "encoding": "ascii"}}]
+        sdk_client_testing.mock("cancel_operation")
+
+        async def never_finishes(
+            operation_id: str,
+            *,
+            timeout: float | None = None,
+        ) -> OperationResponse:
+            del operation_id, timeout
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        sdk_client_testing.wait_operation = never_finishes  # type: ignore[method-assign]
 
     @pytest.mark.asyncio
-    async def test_keepalive_comment_skipped(self):
-        assert await collect_events(": keepalive\n\n") == []
+    async def test_wait_for_operation_timeout(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        with pytest.raises(ContreeError, match="timed out"):
+            await contree_client.wait_for_operation("op-slow", max_wait=0.01)
+        assert sdk_client_testing.calls_for("cancel_operation")
+
+
+class TestCloseWithTrackedOperationsCancelError:
+    """Tests for close() when remote cancellation fails."""
 
     @pytest.mark.asyncio
-    async def test_multiline_data_joined(self):
-        events = await collect_events('data: {"id": 2,\ndata: "type": "init"}\n\n')
-        assert events == [{"id": 2, "type": "init"}]
-
-    @pytest.mark.asyncio
-    async def test_sse_error_frame(self):
-        events = await collect_events("event: sse_error\ndata: stream exploded\n\n")
-        assert events == [{"type": "sse_error", "message": "stream exploded"}]
-
-    @pytest.mark.asyncio
-    async def test_frame_id_injected_when_data_lacks_it(self):
-        events = await collect_events('id: 7\nevent: exit\ndata: {"type": "exit"}\n\n')
-        assert events == [{"type": "exit", "id": 7}]
-
-    @pytest.mark.asyncio
-    async def test_invalid_json_skipped(self):
-        assert await collect_events("data: not-json\n\n") == []
-
-    @pytest.mark.asyncio
-    async def test_non_dict_json_skipped(self):
-        assert await collect_events("data: [1, 2, 3]\n\n") == []
-
-    @pytest.mark.asyncio
-    async def test_final_frame_emitted_at_eof(self):
-        events = await collect_events('id: 3\nevent: completion\ndata: {"id": 3, "type": "completion"}')
-        assert events == [{"id": 3, "type": "completion"}]
-
-    @pytest.mark.asyncio
-    async def test_multiple_frames(self):
-        events = await collect_events(
-            ': keepalive\n\nid: 1\nevent: stdout\ndata: {"id": 1, "type": "stdout"}\n\n'
-            'id: 2\nevent: completion\ndata: {"id": 2, "type": "completion"}\n\n'
+    async def test_close_with_cancel_error(
+        self,
+        tmp_cache: Cache,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        adapter = ContreeClientAdapter(cache=tmp_cache, client=sdk_client_testing)
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-tracked", status=OperationStatus.EXECUTING, image=None),
         )
-        assert [event["type"] for event in events] == ["stdout", "completion"]
+        sdk_client_testing.mock(
+            "cancel_operation",
+            error=ContreeAPIError(500, "cancel failed"),
+        )
+
+        async def never_finishes(
+            operation_id: str,
+            *,
+            timeout: float | None = None,
+        ) -> OperationResponse:
+            del operation_id, timeout
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        sdk_client_testing.wait_operation = never_finishes  # type: ignore[method-assign]
+        adapter._track_operation("op-tracked", kind="image_import")
+
+        await adapter.close()
+
+        assert sdk_client_testing.calls_for("cancel_operation")
+        assert not adapter._tracked_operations
 
 
-class TestSSEHappyPath(TestCase):
-    """Completion event on the first SSE connection."""
+class TestOperationTracking:
+    """Tests for MCP-specific operation tracking behavior."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponse(
-                sse_events=[
-                    make_sse_event(1, "stdout", {"value": "hi", "encoding": "ascii"}, spid=1),
-                    make_completion_event(2),
-                ]
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-sse", "EXECUTING")),
-                FakeResponse(body=operation_body("op-sse", "SUCCESS")),
-            ),
+    @pytest.mark.asyncio
+    async def test_successful_spawn_caches_lineage(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-lineage"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            make_operation(uuid="op-lineage", image="img-child"),
+        )
+
+        operation_id = await contree_client.spawn_instance("touch /new", "img-parent")
+        await contree_client.wait_for_operation(operation_id)
+
+        lineage = await contree_client.cache.get("image", "img-child")
+        assert lineage is not None
+        assert lineage.data == {
+            "parent_image": "img-parent",
+            "operation_id": "op-lineage",
+            "command": "touch /new",
         }
 
     @pytest.mark.asyncio
-    async def test_wait_completes_via_events(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-sse", max_wait=10)
+    async def test_event_endpoint_unavailable_falls_back_to_polling(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock(
+            "wait_operation",
+            error=NotFoundError(404, "events unavailable"),
+        )
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-fallback"),
+        )
+        contree_client.FALLBACK_POLL_INTERVAL = 0
+
+        result = await contree_client.watch_operation_events("op-fallback")
+
         assert result.status == OperationStatus.SUCCESS
-        assert result.result is not None
-        assert result.result.image == "img-result"
-
-
-class TestSSEReconnect(TestCase):
-    """Stream drops without completion; reconnect delivers the rest."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponseSequence(
-                FakeResponse(sse_events=[make_sse_event(1, "stdout", {"value": "a", "encoding": "ascii"}, spid=1)]),
-                FakeResponse(
-                    sse_events=[
-                        make_sse_event(2, "stdout", {"value": "b", "encoding": "ascii"}, spid=1),
-                        make_completion_event(3),
-                    ]
-                ),
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-reconnect", "EXECUTING")),
-                FakeResponse(body=operation_body("op-reconnect", "EXECUTING")),
-                FakeResponse(body=operation_body("op-reconnect", "SUCCESS")),
-            ),
-        }
+        assert len(sdk_client_testing.calls_for("wait_operation")) == 1
+        assert len(sdk_client_testing.calls_for("get_operation_status")) == 1
 
     @pytest.mark.asyncio
-    async def test_reconnect_delivers_completion(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-reconnect", max_wait=10)
-        assert result.status == OperationStatus.SUCCESS
+    async def test_event_endpoint_server_error_is_not_polling_fallback(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock(
+            "wait_operation",
+            error=ContreeAPIError(500, "server error"),
+        )
 
-
-class TestSSETooEarly(TestCase):
-    """425 with Retry-After before the stream becomes available."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponseSequence(
-                FakeResponse(http_status=HTTPStatus.TOO_EARLY, headers=(("Retry-After", "0"),)),
-                FakeResponse(sse_events=[make_completion_event(1)]),
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-early", "PENDING")),
-                FakeResponse(body=operation_body("op-early", "SUCCESS")),
-            ),
-        }
+        with pytest.raises(ContreeAPIError):
+            await contree_client.watch_operation_events("op-error")
+        assert not sdk_client_testing.calls_for("get_operation_status")
 
     @pytest.mark.asyncio
-    async def test_retries_after_425(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-early", max_wait=10)
-        assert result.status == OperationStatus.SUCCESS
+    async def test_waiter_cancellation_cancels_remote_operation(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-cancel", status=OperationStatus.EXECUTING, image=None),
+        )
+        sdk_client_testing.mock("cancel_operation")
 
+        async def never_finishes(
+            operation_id: str,
+            *,
+            timeout: float | None = None,
+        ) -> OperationResponse:
+            del operation_id, timeout
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
 
-class TestSSEGone(TestCase):
-    """410 with Retry-After when events are not durable yet."""
+        sdk_client_testing.wait_operation = never_finishes  # type: ignore[method-assign]
+        waiter = asyncio.create_task(contree_client.wait_for_operation("op-cancel"))
+        while not contree_client.is_tracked("op-cancel"):
+            await asyncio.sleep(0)
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponseSequence(
-                FakeResponse(http_status=HTTPStatus.GONE, headers=(("Retry-After", "0"),)),
-                FakeResponse(sse_events=[make_completion_event(1)]),
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-gone", "EXECUTING")),
-                FakeResponse(body=operation_body("op-gone", "SUCCESS")),
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_retries_after_410(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-gone", max_wait=10)
-        assert result.status == OperationStatus.SUCCESS
-
-
-class TestSSEGoneTerminal(TestCase):
-    """410 persists (events never durable) but the operation is already
-    terminal — return the terminal result instead of timing out."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponse(
-                http_status=HTTPStatus.GONE, headers=(("Retry-After", "30"),)
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-gone-done", "EXECUTING")),
-                FakeResponse(body=operation_body("op-gone-done", "SUCCESS")),
-            ),
-        }
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert sdk_client_testing.calls_for("cancel_operation")
 
     @pytest.mark.asyncio
-    async def test_returns_terminal_without_retry_loop(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-gone-done", max_wait=2)
-        assert result.status == OperationStatus.SUCCESS
+    async def test_shutdown_cancels_tracked_remote_operations(
+        self,
+        tmp_cache: Cache,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
+        adapter = ContreeClientAdapter(cache=tmp_cache, client=sdk_client_testing)
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-shutdown", status=OperationStatus.EXECUTING, image=None),
+        )
+        sdk_client_testing.mock("cancel_operation")
+
+        async def never_finishes(
+            operation_id: str,
+            *,
+            timeout: float | None = None,
+        ) -> OperationResponse:
+            del operation_id, timeout
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        sdk_client_testing.wait_operation = never_finishes  # type: ignore[method-assign]
+        adapter._track_operation("op-shutdown", kind="instance")
+
+        await adapter.close()
+
+        assert sdk_client_testing.calls_for("cancel_operation")
+        assert not adapter._tracked_operations
 
 
-class TestSSEFallbackToPolling(TestCase):
-    """Events endpoint missing (404) — degrade to GET polling."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-legacy", "EXECUTING")),
-                FakeResponse(body=operation_body("op-legacy", "SUCCESS")),
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_polling_fallback(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-legacy", max_wait=10)
-        assert result.status == OperationStatus.SUCCESS
-
-
-class TestSSEServerErrorFrame(TestCase):
-    """`event: sse_error` mid-stream — reconnect resumes from last id."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}/events": FakeResponseSequence(
-                FakeResponse(
-                    sse_events=[
-                        make_sse_event(1, "stdout", {"value": "a", "encoding": "ascii"}, spid=1),
-                        {"type": "sse_error", "message": "producer restarted"},
-                    ]
-                ),
-                FakeResponse(sse_events=[make_completion_event(2)]),
-            ),
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-err", "EXECUTING")),
-                FakeResponse(body=operation_body("op-err", "EXECUTING")),
-                FakeResponse(body=operation_body("op-err", "SUCCESS")),
-            ),
-        }
-
-    @pytest.mark.asyncio
-    async def test_recovers_from_sse_error(self, contree_client: ContreeClient):
-        result = await contree_client.wait_for_operation("op-err", max_wait=10)
-        assert result.status == OperationStatus.SUCCESS
-
-
-class TestOperationCacheTerminalOnly(TestCase):
+class TestOperationCacheTerminalOnly:
     """Non-terminal operations must never be served from cache."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /operations/{uuid}": FakeResponseSequence(
-                FakeResponse(body=operation_body("op-cache", "EXECUTING")),
-                FakeResponse(body=operation_body("op-cache", "SUCCESS")),
-                # Only reachable if the terminal result was NOT cached
-                FakeResponse(body=operation_body("op-cache", "FAILED")),
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_operations(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-cache", status=OperationStatus.EXECUTING, image=None),
+        )
+        sdk_client_testing.mock(
+            "get_operation_status",
+            make_operation(uuid="op-cache", status=OperationStatus.SUCCESS),
+        )
 
     @pytest.mark.asyncio
-    async def test_non_terminal_not_cached(self, contree_client: ContreeClient):
+    async def test_non_terminal_not_cached(
+        self,
+        contree_client: ContreeClientAdapter,
+        sdk_client_testing: ContreeAsyncClient,
+    ) -> None:
         first = await contree_client.get_operation("op-cache")
         assert first.status == OperationStatus.EXECUTING
 
         second = await contree_client.get_operation("op-cache")
         assert second.status == OperationStatus.SUCCESS
 
-        # Terminal result is cached — the FAILED response must not be reached
         third = await contree_client.get_operation("op-cache")
         assert third.status == OperationStatus.SUCCESS
+        assert len(sdk_client_testing.calls_for("get_operation_status")) == 2

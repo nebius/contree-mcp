@@ -1,27 +1,37 @@
-from http import HTTPStatus
-
 import pytest
+from contree_client import ContreeError
+from contree_client.models import Image as SDKImage
+from contree_client.models import ImageListResponse
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import Image
 from contree_mcp.tools.list_images import list_images
-from tests.conftest import FakeResponse, FakeResponses
+from contree_mcp.tools.mcp_types import Image
 
 from . import TestCase
 
 
 class TestListImagesHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(
-                body={
-                    "images": [
-                        Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z"),
-                        Image(uuid="img-2", tag=None, created_at="2024-01-01T00:00:00Z"),
-                    ]
-                }
+    @pytest.fixture(autouse=True)
+    def mock_images(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock(
+            "list_images",
+            ImageListResponse(
+                images=[
+                    SDKImage(
+                        uuid="img-1",
+                        tag="python:3.11",
+                        created_at="2024-01-01T00:00:00Z",
+                        operation_uuid=None,
+                    ),
+                    SDKImage(
+                        uuid="img-2",
+                        tag=None,
+                        created_at="2024-01-01T00:00:00Z",
+                        operation_uuid=None,
+                    ),
+                ]
             ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_basic_usage(self) -> None:
@@ -43,11 +53,9 @@ class TestListImagesHappyPath(TestCase):
 
 
 class TestListImagesEdgeCases(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(body={"images": []}),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_empty_images(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("list_images", ImageListResponse(images=[]))
 
     @pytest.mark.asyncio
     async def test_empty_result(self) -> None:
@@ -56,14 +64,9 @@ class TestListImagesEdgeCases(TestCase):
 
 
 class TestListImagesErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(
-                http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
-                body={"error": "API Error"},
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_api_error(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("list_images", error=ContreeError("API Error"))
 
     @pytest.mark.asyncio
     async def test_api_error_propagated(self) -> None:

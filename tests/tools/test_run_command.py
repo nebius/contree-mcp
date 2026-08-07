@@ -1,37 +1,29 @@
-from http import HTTPStatus
-
 import pytest
+from contree_client.models import InstanceSpawnResponse
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import (
-    ConsumedResources,
-    InstanceMetadata,
-    InstanceResult,
-    OperationKind,
-    OperationResponse,
-    OperationResult,
-    OperationStatus,
-    ProcessExitState,
-    Stream,
-)
 from contree_mcp.context import FILES_CACHE
+from contree_mcp.tools.mcp_types import (
+    InstanceMetadata,
+    OperationResponse,
+    OperationStatus,
+)
 from contree_mcp.tools.run import run
-from tests.conftest import FakeResponse, FakeResponses, make_completion_event, make_sse_event
 
 from . import TestCase
+from .sdk_factories import instance_operation
 
 
 class TestRunCommandBasic(TestCase):
     """Test basic run_command functionality."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-run-123"},
-                headers=(("Location", "/v1/operations/op-run-123"),),
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_spawn(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-run-123"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(uuid="op-run-123", result_image="img-result"),
+        )
 
     @pytest.mark.asyncio
     async def test_basic_command_wait_false(self) -> None:
@@ -44,41 +36,20 @@ class TestRunCommandBasic(TestCase):
 class TestRunCommandWithWait(TestCase):
     """Test run_command with wait=true (completion signalled via SSE events)."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-wait-123"},
-                headers=(("Location", "/v1/operations/op-wait-123"),),
+    @pytest.fixture(autouse=True)
+    def mock_spawn(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-wait-123"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(
+                uuid="op-wait-123",
+                command="echo hello",
+                image="00000000-0000-0000-0000-000000000001",
+                stdout="hello world",
+                elapsed_time=0.5,
+                result_image="img-result-wait",
             ),
-            "GET /operations/{uuid}/events": FakeResponse(
-                sse_events=[
-                    make_sse_event(1, "stdout", {"value": "hello world", "encoding": "ascii"}, spid=1),
-                    make_completion_event(2, result_image="img-result-wait"),
-                ]
-            ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-wait-123",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "echo hello",
-                        "image": "00000000-0000-0000-0000-000000000001",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="hello world", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=0.5),
-                        ),
-                    },
-                    "result": OperationResult(image="img-result-wait", tag=None),
-                }
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_command_with_wait_true(self) -> None:
@@ -93,35 +64,20 @@ class TestRunCommandWithWait(TestCase):
 class TestRunCommandWithDirectoryState(TestCase):
     """Test run_command with directory_state_id."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-ds-123"},
-                headers=(("Location", "/v1/operations/op-ds-123"),),
+    @pytest.fixture(autouse=True)
+    def mock_spawn(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-ds-123"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(
+                uuid="op-ds-123",
+                command="python /app/script.py",
+                image="00000000-0000-0000-0000-000000000001",
+                stdout="file executed",
+                elapsed_time=1.0,
+                result_image="img-ds-result",
             ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-ds-123",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "python /app/script.py",
-                        "image": "00000000-0000-0000-0000-000000000001",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="file executed", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=1.0),
-                        ),
-                    },
-                    "result": OperationResult(image="img-ds-result", tag=None),
-                }
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_with_directory_state(self) -> None:
@@ -185,15 +141,13 @@ class TestRunCommandWithDirectoryState(TestCase):
 class TestRunCommandWithFiles(TestCase):
     """Test run_command with files parameter."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-files-123"},
-                headers=(("Location", "/v1/operations/op-files-123"),),
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_spawn(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-files-123"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(uuid="op-files-123", result_image="img-result"),
+        )
 
     @pytest.mark.asyncio
     async def test_with_files_param(self) -> None:
@@ -211,36 +165,19 @@ class TestRunCommandWithFiles(TestCase):
 class TestRunCommandLineage(TestCase):
     """Test run_command saves image lineage."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-lineage-123"},
-                headers=(("Location", "/v1/operations/op-lineage-123"),),
+    @pytest.fixture(autouse=True)
+    def mock_spawn(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("spawn_instance", InstanceSpawnResponse(uuid="op-lineage-123"))
+        sdk_client_testing.mock(
+            "wait_operation",
+            instance_operation(
+                uuid="op-lineage-123",
+                command="apt-get install -y python",
+                image="00000000-0000-0000-0000-000000000002",
+                elapsed_time=0.5,
+                result_image="img-new-lineage",
             ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-lineage-123",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "apt-get install -y python",
-                        "image": "00000000-0000-0000-0000-000000000002",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=0.5),
-                        ),
-                    },
-                    # Different result_image to trigger lineage save
-                    "result": OperationResult(image="img-new-lineage", tag=None),
-                }
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_saves_image_lineage(self, general_cache) -> None:

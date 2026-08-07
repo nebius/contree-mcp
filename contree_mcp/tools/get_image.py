@@ -1,5 +1,5 @@
-from contree_mcp.backend_types import Image
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import Image
 
 
 async def get_image(image: str) -> Image:
@@ -25,5 +25,7 @@ async def get_image(image: str) -> Image:
     """
     client = CLIENT.get()
     if image.startswith("tag:"):
-        return await client.get_image_by_tag(image[4:])
-    return await client.get_image(image)
+        result = await client.get_image_by_tag(image[4:])
+    else:
+        result = await client.get_image(image)
+    return Image.model_validate(result.to_dict())

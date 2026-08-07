@@ -3,20 +3,19 @@
 import json
 
 import pytest
-
-from contree_mcp.backend_types import (
-    ConsumedResources,
-    InstanceMetadata,
+from contree_client import ContreeError, NotFoundError
+from contree_client.models import (
     InstanceResult,
-    OperationKind,
+    InstanceResultResources,
+    InstanceResultState,
+    OperationInstanceMetadata,
     OperationResponse,
     OperationResult,
     OperationStatus,
-    ProcessExitState,
-    Stream,
+    StreamRepr,
 )
+
 from contree_mcp.resources.instance_operation import instance_operation
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
@@ -25,26 +24,26 @@ class TestInstanceOperationSuccess(TestCase):
     """Tests for instance_operation resource - successful operations."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-123",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.INSTANCE,
-            metadata=InstanceMetadata(
+            kind="instance",
+            metadata=OperationInstanceMetadata(
                 command="echo hello",
                 image="img-1",
                 result=InstanceResult(
-                    state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                    stdout=Stream(value="Hello, World!", encoding="ascii"),
-                    stderr=Stream(value="", encoding="ascii"),
-                    resources=ConsumedResources(elapsed_time=1.5, user_cpu_time=0.8),
+                    state=InstanceResultState(exit_code=0, pid=1, timed_out=False),
+                    stdout=StreamRepr(value="Hello, World!", encoding="ascii"),
+                    stderr=StreamRepr(value="", encoding="ascii"),
+                    resources=InstanceResultResources(elapsed_time=1.5, user_cpu_time=0.8),
                 ),
             ),
             result=OperationResult(image="img-result-123", tag=None),
         )
-        await cache.put("operation", "op-123", op.model_dump())
+        await cache.put("operation", "op-123", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -63,25 +62,25 @@ class TestInstanceOperationFailed(TestCase):
     """Tests for instance_operation resource - failed operations."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-456",
             status=OperationStatus.FAILED,
-            kind=OperationKind.INSTANCE,
+            kind="instance",
             error="Process exited with code 1",
-            metadata=InstanceMetadata(
+            metadata=OperationInstanceMetadata(
                 command="badcmd",
                 image="img-1",
                 result=InstanceResult(
-                    state=ProcessExitState(exit_code=1, pid=1, timed_out=False),
-                    stdout=Stream(value="", encoding="ascii"),
-                    stderr=Stream(value="Command not found", encoding="ascii"),
+                    state=InstanceResultState(exit_code=1, pid=1, timed_out=False),
+                    stdout=StreamRepr(value="", encoding="ascii"),
+                    stderr=StreamRepr(value="Command not found", encoding="ascii"),
                 ),
             ),
         )
-        await cache.put("operation", "op-456", op.model_dump())
+        await cache.put("operation", "op-456", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -99,21 +98,13 @@ class TestInstanceOperationFailed(TestCase):
 class TestInstanceOperationNotFound(TestCase):
     """Tests for instance_operation resource - not found."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        from http import HTTPStatus
-
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "Operation not found"},
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_operation_not_found(self, contree_client) -> None:
+    async def test_operation_not_found(self, sdk_client_testing) -> None:
         """Test error when operation is not found."""
-        from contree_mcp.client import ContreeError
+        sdk_client_testing.mock(
+            "get_operation_status",
+            error=NotFoundError(404, "Operation not found"),
+        )
 
         with pytest.raises(ContreeError):
             await instance_operation(operation_id="nonexistent")
@@ -123,25 +114,25 @@ class TestInstanceOperationWithResources(TestCase):
     """Tests for instance_operation resource - with resource data."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-resources",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.INSTANCE,
-            metadata=InstanceMetadata(
+            kind="instance",
+            metadata=OperationInstanceMetadata(
                 command="sleep 5",
                 image="img-1",
                 result=InstanceResult(
-                    state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                    stdout=Stream(value="done", encoding="ascii"),
-                    stderr=Stream(value="", encoding="ascii"),
-                    resources=ConsumedResources(elapsed_time=5.2, user_cpu_time=3.1),
+                    state=InstanceResultState(exit_code=0, pid=1, timed_out=False),
+                    stdout=StreamRepr(value="done", encoding="ascii"),
+                    stderr=StreamRepr(value="", encoding="ascii"),
+                    resources=InstanceResultResources(elapsed_time=5.2, user_cpu_time=3.1),
                 ),
             ),
         )
-        await cache.put("operation", "op-resources", op.model_dump())
+        await cache.put("operation", "op-resources", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -158,24 +149,24 @@ class TestInstanceOperationTimedOut(TestCase):
     """Tests for instance_operation resource - timed out operations."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-timeout",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.INSTANCE,
-            metadata=InstanceMetadata(
+            kind="instance",
+            metadata=OperationInstanceMetadata(
                 command="sleep 1000",
                 image="img-1",
                 result=InstanceResult(
-                    state=ProcessExitState(exit_code=-1, pid=1, timed_out=True),
-                    stdout=Stream(value="Partial output...", encoding="ascii"),
-                    stderr=Stream(value="", encoding="ascii"),
+                    state=InstanceResultState(exit_code=-1, pid=1, timed_out=True),
+                    stdout=StreamRepr(value="Partial output...", encoding="ascii"),
+                    stderr=StreamRepr(value="", encoding="ascii"),
                 ),
             ),
         )
-        await cache.put("operation", "op-timeout", op.model_dump())
+        await cache.put("operation", "op-timeout", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -192,16 +183,16 @@ class TestInstanceOperationWrongKind(TestCase):
     """Tests for instance_operation resource - wrong operation kind."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with wrong kind."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-import",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.IMAGE_IMPORT,
+            kind="image_import",
             result=OperationResult(image="img-123", tag="latest"),
         )
-        await cache.put("operation", "op-import", op.model_dump())
+        await cache.put("operation", "op-import", op.to_dict())
         return cache
 
     @pytest.mark.asyncio

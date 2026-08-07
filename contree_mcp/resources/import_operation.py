@@ -1,5 +1,5 @@
-from contree_mcp.backend_types import ImportImageMetadata, OperationKind
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import ImportImageMetadata, OperationKind, OperationResponse
 
 
 async def import_operation(operation_id: str) -> str:
@@ -29,7 +29,8 @@ async def import_operation(operation_id: str) -> str:
     REGISTRY_URL: registry.example.com/repo/image:tag
     """
     client = CLIENT.get()
-    op = await client.get_operation(operation_id)
+    operation = await client.get_operation(operation_id)
+    op = OperationResponse.model_validate(operation.to_dict())
     if op.kind != OperationKind.IMAGE_IMPORT:
         raise ValueError(f"Operation {operation_id} is not an import operation (kind={op.kind})")
 

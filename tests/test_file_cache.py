@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import time
-from http import HTTPStatus
 from pathlib import Path
 
 import pytest
+from contree_client import NotFoundError
+from contree_client.models import FileResponse
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import FileResponse
-from contree_mcp.client import ContreeClient
+from contree_mcp.client import ContreeClientAdapter
 from contree_mcp.file_cache import DirectoryState, FileCache, FileState
 
-from .conftest import FakeResponse, FakeResponses
+UPLOAD_RESPONSE = FileResponse(uuid="file-uuid-1", sha256="sha256hash", size=-1)
 
 
 @pytest.fixture
@@ -470,26 +471,21 @@ class TestFileCache:
 class TestSyncDirectory:
     """Tests for sync_directory method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
-        }
-
     @pytest.fixture(autouse=True)
-    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
-        return contree_client
+    def mock_file_api(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "File not found"))
+        sdk_client_testing.mock("upload_file", UPLOAD_RESPONSE)
 
     @pytest.mark.asyncio
     async def test_sync_new_directory(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test syncing a directory for the first time."""
         sync_dir = tmp_path / "sync_test"
         sync_dir.mkdir()
         (sync_dir / "file1.txt").write_text("content1")
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         assert state_id == 1
         # Verify directory_state was created
@@ -499,27 +495,27 @@ class TestSyncDirectory:
 
     @pytest.mark.asyncio
     async def test_sync_directory_unchanged_returns_cached(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that syncing unchanged directory returns cached state."""
         sync_dir = tmp_path / "sync_test"
         sync_dir.mkdir()
         (sync_dir / "file1.txt").write_text("content1")
 
-        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id1 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         assert state_id1 == state_id2
 
     @pytest.mark.asyncio
     async def test_sync_empty_directory(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test syncing an empty directory."""
         sync_dir = tmp_path / "empty_sync"
         sync_dir.mkdir()
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         assert state_id == 1
         files = await file_cache.get_synced_directory_files(state_id)
@@ -527,14 +523,14 @@ class TestSyncDirectory:
 
     @pytest.mark.asyncio
     async def test_sync_directory_creates_file_records(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that sync creates file records in the database."""
         sync_dir = tmp_path / "sync_test"
         sync_dir.mkdir()
         (sync_dir / "test.txt").write_text("hello")
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         files = await file_cache.get_synced_directory_files(state_id)
         assert len(files) == 1
@@ -544,7 +540,7 @@ class TestSyncDirectory:
 
     @pytest.mark.asyncio
     async def test_sync_directory_with_excludes(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test syncing directory with exclude patterns."""
         sync_dir = tmp_path / "sync_test"
@@ -552,14 +548,16 @@ class TestSyncDirectory:
         (sync_dir / "keep.txt").write_text("keep")
         (sync_dir / "skip.pyc").write_text("skip")
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=["*.pyc"])
+        state_id = await file_cache.sync_directory(
+            client_adapter_testing, sync_dir, destination="/app", excludes=["*.pyc"]
+        )
 
         # Note: excludes may not work due to known bug in traverse_directory_files
         assert state_id is not None
 
     @pytest.mark.asyncio
     async def test_sync_directory_with_modified_files(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test syncing a directory after files have been modified."""
         sync_dir = tmp_path / "sync_test"
@@ -568,14 +566,14 @@ class TestSyncDirectory:
         test_file.write_text("original")
 
         # First sync
-        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id1 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         # Modify the file (change content and mtime)
         time.sleep(0.01)  # Ensure mtime changes
         test_file.write_text("modified content")
 
         # Second sync should detect change and update
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         assert state_id1 == state_id2  # Same directory state ID
         files = await file_cache.get_synced_directory_files(state_id2)
@@ -583,7 +581,7 @@ class TestSyncDirectory:
 
     @pytest.mark.asyncio
     async def test_sync_directory_with_added_file(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test syncing a directory after a new file has been added."""
         sync_dir = tmp_path / "sync_test"
@@ -591,7 +589,7 @@ class TestSyncDirectory:
         (sync_dir / "file1.txt").write_text("content1")
 
         # First sync
-        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id1 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
         files1 = await file_cache.get_synced_directory_files(state_id1)
         assert len(files1) == 1
 
@@ -599,7 +597,7 @@ class TestSyncDirectory:
         (sync_dir / "file2.txt").write_text("content2")
 
         # Second sync should detect the new file
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         assert state_id1 == state_id2
         files2 = await file_cache.get_synced_directory_files(state_id2)
@@ -607,7 +605,7 @@ class TestSyncDirectory:
 
     @pytest.mark.asyncio
     async def test_sync_directory_update_preserves_uuid(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that updating synced directory preserves uuid for unchanged files.
 
@@ -621,7 +619,7 @@ class TestSyncDirectory:
             (sync_dir / f"file{i}.txt").write_text(f"content{i}")
 
         # First sync
-        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id1 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
         files1 = await file_cache.get_synced_directory_files(state_id1)
         assert len(files1) == 5
         # All files should have uuid
@@ -632,7 +630,7 @@ class TestSyncDirectory:
         (sync_dir / "file_new.txt").write_text("new content")
 
         # Second sync should preserve uuid for unchanged files
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
         files2 = await file_cache.get_synced_directory_files(state_id2)
         assert len(files2) == 6
 
@@ -642,7 +640,7 @@ class TestSyncDirectory:
 
     @pytest.mark.asyncio
     async def test_sync_directory_different_excludes_creates_new_state(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that different exclude patterns create different directory states."""
         sync_dir = tmp_path / "sync_test"
@@ -651,10 +649,12 @@ class TestSyncDirectory:
         (sync_dir / "skip.pyc").write_text("skip")
 
         # First sync without excludes
-        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=[])
+        state_id1 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app", excludes=[])
 
         # Second sync with excludes - should create different state
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app", excludes=["*.pyc"])
+        state_id2 = await file_cache.sync_directory(
+            client_adapter_testing, sync_dir, destination="/app", excludes=["*.pyc"]
+        )
 
         # Different exclude patterns should produce different directory states
         assert state_id1 != state_id2
@@ -678,20 +678,15 @@ class TestSyncDirectory:
 class TestRevalidation:
     """Tests for file revalidation after 24h."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
-            "HEAD /files": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
-        }
-
     @pytest.fixture(autouse=True)
-    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
-        return contree_client
+    def mock_file_api(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "File not found"))
+        sdk_client_testing.mock("upload_file", UPLOAD_RESPONSE)
+        sdk_client_testing.mock("check_file_exists", False)
 
     @pytest.mark.asyncio
     async def test_revalidation_reuploads_stale_files(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that files are re-uploaded when server returns 404 after 24h."""
         sync_dir = tmp_path / "sync_test"
@@ -699,7 +694,7 @@ class TestRevalidation:
         (sync_dir / "file1.txt").write_text("content1")
 
         # First sync
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         # Age the directory state to trigger revalidation
         await file_cache.conn.execute(
@@ -709,7 +704,7 @@ class TestRevalidation:
         await file_cache.conn.commit()
 
         # Second sync - should trigger revalidation and re-upload
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         assert state_id == state_id2
         files = await file_cache.get_synced_directory_files(state_id2)
@@ -719,14 +714,14 @@ class TestRevalidation:
 
     @pytest.mark.asyncio
     async def test_revalidation_updates_timestamp(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that revalidation resets the updated_at timestamp."""
         sync_dir = tmp_path / "sync_test"
         sync_dir.mkdir()
         (sync_dir / "file1.txt").write_text("content1")
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         # Age the directory state
         await file_cache.conn.execute(
@@ -736,7 +731,7 @@ class TestRevalidation:
         await file_cache.conn.commit()
 
         # Sync again triggers revalidation
-        await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         # Verify updated_at was refreshed (no longer needs revalidation)
         needs = await file_cache._needs_revalidation(state_id)
@@ -744,7 +739,7 @@ class TestRevalidation:
 
     @pytest.mark.asyncio
     async def test_revalidation_with_multiple_files(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test revalidation with multiple files where server lost all of them."""
         sync_dir = tmp_path / "sync_test"
@@ -753,7 +748,7 @@ class TestRevalidation:
         (sync_dir / "file2.txt").write_text("content2")
         (sync_dir / "file3.txt").write_text("content3")
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         # Age the directory state
         await file_cache.conn.execute(
@@ -763,7 +758,7 @@ class TestRevalidation:
         await file_cache.conn.commit()
 
         # Second sync - revalidation should re-upload all files
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         assert state_id == state_id2
         files = await file_cache.get_synced_directory_files(state_id2)
@@ -771,17 +766,17 @@ class TestRevalidation:
 
     @pytest.mark.asyncio
     async def test_no_revalidation_within_24h(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that revalidation is not triggered within 24h."""
         sync_dir = tmp_path / "sync_test"
         sync_dir.mkdir()
         (sync_dir / "file1.txt").write_text("content1")
 
-        state_id1 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id1 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         # Immediate second sync - no revalidation needed
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         assert state_id1 == state_id2
 
@@ -873,27 +868,22 @@ class TestRevalidation:
 class TestRevalidationNoStaleFiles:
     """Tests for revalidation when server still has all files."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
-            "HEAD /files": FakeResponse(),  # 200 OK - files still exist on server
-        }
-
     @pytest.fixture(autouse=True)
-    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
-        return contree_client
+    def mock_file_api(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "File not found"))
+        sdk_client_testing.mock("upload_file", UPLOAD_RESPONSE)
+        sdk_client_testing.mock("check_file_exists", True)
 
     @pytest.mark.asyncio
     async def test_revalidation_no_reupload_when_files_exist(
-        self, contree_client: ContreeClient, file_cache: FileCache, tmp_path: Path
+        self, client_adapter_testing: ContreeClientAdapter, file_cache: FileCache, tmp_path: Path
     ) -> None:
         """Test that no re-upload happens when server still has files after 24h."""
         sync_dir = tmp_path / "sync_test"
         sync_dir.mkdir()
         (sync_dir / "file1.txt").write_text("content1")
 
-        state_id = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         # Get the original file uuid
         files_before = await file_cache.get_synced_directory_files(state_id)
@@ -907,7 +897,7 @@ class TestRevalidationNoStaleFiles:
         await file_cache.conn.commit()
 
         # Sync again - revalidation should find files still exist, no re-upload
-        state_id2 = await file_cache.sync_directory(contree_client, sync_dir, destination="/app")
+        state_id2 = await file_cache.sync_directory(client_adapter_testing, sync_dir, destination="/app")
 
         assert state_id == state_id2
         files_after = await file_cache.get_synced_directory_files(state_id2)

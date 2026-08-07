@@ -2,19 +2,16 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from contree_client import NotFoundError
+from contree_client.models import FileResponse
+from contree_client.testing import ContreeAsyncClient
 
-from contree_mcp.backend_types import FileResponse
 from contree_mcp.tools.rsync import rsync
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
 
 class TestRsyncValidation(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {}
-
     @pytest.mark.asyncio
     async def test_rejects_relative_source_path(self):
         with pytest.raises(ValueError, match="absolute path"):
@@ -37,11 +34,13 @@ class TestRsync(TestCase):
             Path(tmpdir, "subdir", "module.py").write_text("class Foo: pass")
             yield tmpdir
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-123", sha256="abc123def456")),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_upload(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("get_file", error=NotFoundError(404, "File not found"))
+        sdk_client_testing.mock(
+            "upload_file",
+            FileResponse(uuid="file-123", sha256="abc123def456", size=-1),
+        )
 
     @pytest.mark.asyncio
     async def test_basic_sync(self, temp_project_dir: str) -> None:

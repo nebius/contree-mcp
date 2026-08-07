@@ -387,7 +387,8 @@ Use this to rollback to any ancestor or understand how an image was created.
 ## Dependencies
 
 - `mcp` - Model Context Protocol SDK
-- `httpx` - Async HTTP client
+- `contree-client[httpx]` - Official Contree API SDK and async transport
+- `httpx` - Direct HTTP client for registry authentication and update checks
 - `argclass` - Argument parsing
 - `aiosqlite` - Async SQLite database
 - `pydantic` - Data validation

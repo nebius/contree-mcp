@@ -1,23 +1,23 @@
-from http import HTTPStatus
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from contree_client.models import OperationStatus as SDKOperationStatus
+from contree_client.testing import ContreeAsyncClient
 
 from contree_mcp.auth.registry import RegistryAuth
-from contree_mcp.backend_types import (
+from contree_mcp.tools.import_image import import_image
+from contree_mcp.tools.mcp_types import (
     OperationKind,
     OperationResponse,
-    OperationResult,
     OperationStatus,
 )
-from contree_mcp.tools.import_image import import_image
-from tests.conftest import FakeResponse, FakeResponses, make_completion_event
 
 from . import TestCase
+from .sdk_factories import import_operation as sdk_import_operation
 
 
 @pytest.fixture(autouse=True)
-async def setup_registry_auth(general_cache, contree_client):
+async def setup_registry_auth(general_cache, client_adapter_testing):
     """Set up registry authentication in cache for all import tests."""
     await general_cache.put(
         kind="registry_token",
@@ -38,15 +38,13 @@ async def setup_registry_auth(general_cache, contree_client):
 class TestImportImageWaitFalse(TestCase):
     """Test import_image with wait=false."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-import-123"},
-                headers=(("Location", "/v1/operations/op-import-123"),),
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_import(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("import_image", "op-import-123")
+        sdk_client_testing.mock(
+            "wait_operation",
+            sdk_import_operation(uuid="op-import-123", result_image="img-imported"),
+        )
 
     @pytest.mark.asyncio
     async def test_import_with_wait_false(self) -> None:
@@ -59,32 +57,17 @@ class TestImportImageWaitFalse(TestCase):
 class TestImportImageWaitTrue(TestCase):
     """Test import_image with wait=true."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-import-wait-123"},
-                headers=(("Location", "/v1/operations/op-import-wait-123"),),
+    @pytest.fixture(autouse=True)
+    def mock_import(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("import_image", "op-import-wait-123")
+        sdk_client_testing.mock(
+            "wait_operation",
+            sdk_import_operation(
+                uuid="op-import-wait-123",
+                tag="python:3.11",
+                result_image="img-imported-result",
             ),
-            "GET /operations/{uuid}/events": FakeResponse(
-                sse_events=[make_completion_event(1, result_image="img-imported-result")]
-            ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-import-wait-123",
-                    "kind": OperationKind.IMAGE_IMPORT.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "error": None,
-                    "metadata": {
-                        "registry": {"url": "docker.io/library/python:3.11-slim"},
-                        "tag": "python:3.11",
-                        "timeout": 300,
-                    },
-                    "result": OperationResult(image="img-imported-result", tag="python:3.11"),
-                }
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_import_with_wait_true(self) -> None:
@@ -121,25 +104,18 @@ class TestImportImageWaitTrue(TestCase):
 class TestImportImageNoResult(TestCase):
     """Test import_image when no result image is returned."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-import-fail-123"},
-                headers=(("Location", "/v1/operations/op-import-fail-123"),),
+    @pytest.fixture(autouse=True)
+    def mock_import(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("import_image", "op-import-fail-123")
+        sdk_client_testing.mock(
+            "wait_operation",
+            sdk_import_operation(
+                uuid="op-import-fail-123",
+                status=SDKOperationStatus.FAILED,
+                error="Image not found",
+                include_result=False,
             ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-import-fail-123",
-                    "kind": OperationKind.IMAGE_IMPORT.value,
-                    "status": OperationStatus.FAILED.value,
-                    "error": "Image not found",
-                    "metadata": None,
-                    "result": None,
-                }
-            ),
-        }
+        )
 
     @pytest.mark.asyncio
     async def test_import_failed_no_result(self, general_cache) -> None:
@@ -161,7 +137,7 @@ class TestImportImageTokenExpired(TestCase):
     """Test import_image when cached token is expired."""
 
     @pytest.fixture(autouse=True)
-    async def setup_expired_token(self, general_cache, contree_client):
+    async def setup_expired_token(self, general_cache, client_adapter_testing):
         """Set up expired token that will fail validation."""
         await general_cache.put(
             kind="registry_token",
@@ -197,15 +173,13 @@ class TestImportImageTokenExpired(TestCase):
 class TestImportImageAnonymous(TestCase):
     """Test import_image with anonymous access."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /images/import": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-import-anon-123"},
-                headers=(("Location", "/v1/operations/op-import-anon-123"),),
-            ),
-        }
+    @pytest.fixture(autouse=True)
+    def mock_import(self, sdk_client_testing: ContreeAsyncClient) -> None:
+        sdk_client_testing.mock("import_image", "op-import-anon-123")
+        sdk_client_testing.mock(
+            "wait_operation",
+            sdk_import_operation(uuid="op-import-anon-123", result_image="img-imported"),
+        )
 
     @pytest.mark.asyncio
     async def test_anonymous_import_without_credentials(self, general_cache) -> None:

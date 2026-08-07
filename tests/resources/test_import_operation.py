@@ -1,17 +1,16 @@
 """Tests for import_operation resource."""
 
 import pytest
-
-from contree_mcp.backend_types import (
-    ImageRegistry,
-    ImportImageMetadata,
-    OperationKind,
+from contree_client import ContreeError, NotFoundError
+from contree_client.models import (
+    ImageImportMetadata,
+    ImageImportMetadataRegistry,
     OperationResponse,
     OperationResult,
     OperationStatus,
 )
+
 from contree_mcp.resources.import_operation import import_operation
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
@@ -20,20 +19,22 @@ class TestImportOperationSuccess(TestCase):
     """Tests for import_operation resource - successful operations."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-import-123",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.IMAGE_IMPORT,
-            metadata=ImportImageMetadata(
-                registry=ImageRegistry(url="docker://docker.io/python:3.11-slim"),
+            kind="image_import",
+            metadata=ImageImportMetadata(
+                registry=ImageImportMetadataRegistry(
+                    url="docker://docker.io/python:3.11-slim"
+                ),
                 tag="python:3.11-slim",
             ),
             result=OperationResult(image="img-imported-123", tag="python:3.11-slim"),
         )
-        await cache.put("operation", "op-import-123", op.model_dump())
+        await cache.put("operation", "op-import-123", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -51,19 +52,21 @@ class TestImportOperationFailed(TestCase):
     """Tests for import_operation resource - failed operations."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-import-456",
             status=OperationStatus.FAILED,
-            kind=OperationKind.IMAGE_IMPORT,
+            kind="image_import",
             error="Image not found in registry",
-            metadata=ImportImageMetadata(
-                registry=ImageRegistry(url="docker://docker.io/nonexistent:latest"),
+            metadata=ImageImportMetadata(
+                registry=ImageImportMetadataRegistry(
+                    url="docker://docker.io/nonexistent:latest"
+                ),
             ),
         )
-        await cache.put("operation", "op-import-456", op.model_dump())
+        await cache.put("operation", "op-import-456", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -78,21 +81,13 @@ class TestImportOperationFailed(TestCase):
 class TestImportOperationNotFound(TestCase):
     """Tests for import_operation resource - not found."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        from http import HTTPStatus
-
-        return {
-            "GET /operations/{uuid}": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "Operation not found"},
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_import_not_found(self, contree_client) -> None:
+    async def test_import_not_found(self, sdk_client_testing) -> None:
         """Test error when import operation is not found."""
-        from contree_mcp.client import ContreeError
+        sdk_client_testing.mock(
+            "get_operation_status",
+            error=NotFoundError(404, "Operation not found"),
+        )
 
         with pytest.raises(ContreeError):
             await import_operation(operation_id="nonexistent")
@@ -102,19 +97,19 @@ class TestImportOperationWithoutTag(TestCase):
     """Tests for import_operation resource - without tag."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-import-notag",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.IMAGE_IMPORT,
-            metadata=ImportImageMetadata(
-                registry=ImageRegistry(url="docker://docker.io/ubuntu:22.04"),
+            kind="image_import",
+            metadata=ImageImportMetadata(
+                registry=ImageImportMetadataRegistry(url="docker://docker.io/ubuntu:22.04"),
             ),
             result=OperationResult(image="img-ubuntu-123", tag=None),
         )
-        await cache.put("operation", "op-import-notag", op.model_dump())
+        await cache.put("operation", "op-import-notag", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -130,18 +125,20 @@ class TestImportOperationCancelled(TestCase):
     """Tests for import_operation resource - cancelled operations."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with test data."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-import-cancelled",
             status=OperationStatus.CANCELLED,
-            kind=OperationKind.IMAGE_IMPORT,
-            metadata=ImportImageMetadata(
-                registry=ImageRegistry(url="docker://docker.io/large-image:latest"),
+            kind="image_import",
+            metadata=ImageImportMetadata(
+                registry=ImageImportMetadataRegistry(
+                    url="docker://docker.io/large-image:latest"
+                ),
             ),
         )
-        await cache.put("operation", "op-import-cancelled", op.model_dump())
+        await cache.put("operation", "op-import-cancelled", op.to_dict())
         return cache
 
     @pytest.mark.asyncio
@@ -155,15 +152,15 @@ class TestImportOperationWrongKind(TestCase):
     """Tests for import_operation resource - wrong operation kind."""
 
     @pytest.fixture
-    async def setup_cache(self, contree_client):
+    async def setup_cache(self, client_adapter_testing):
         """Set up cache with wrong kind."""
-        cache = contree_client.cache
+        cache = client_adapter_testing.cache
         op = OperationResponse(
             uuid="op-instance",
             status=OperationStatus.SUCCESS,
-            kind=OperationKind.INSTANCE,
+            kind="instance",
         )
-        await cache.put("operation", "op-instance", op.model_dump())
+        await cache.put("operation", "op-instance", op.to_dict())
         return cache
 
     @pytest.mark.asyncio

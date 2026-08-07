@@ -1,7 +1,7 @@
 import json
 
-from contree_mcp.backend_types import InstanceMetadata, OperationKind
 from contree_mcp.context import CLIENT
+from contree_mcp.tools.mcp_types import InstanceMetadata, OperationKind, OperationResponse
 
 
 async def instance_operation(operation_id: str) -> str:
@@ -22,7 +22,8 @@ async def instance_operation(operation_id: str) -> str:
     """
     client = CLIENT.get()
     # Use get_operation which checks cache first, then fetches from API
-    op = await client.get_operation(operation_id)
+    operation = await client.get_operation(operation_id)
+    op = OperationResponse.model_validate(operation.to_dict())
 
     if op.kind != OperationKind.INSTANCE:
         raise ValueError(f"Operation {operation_id} is not an instance operation (kind={op.kind})")
