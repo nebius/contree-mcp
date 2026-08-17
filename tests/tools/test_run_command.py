@@ -1,130 +1,74 @@
-from http import HTTPStatus
-
 import pytest
+from contree_client.models import InstanceSpawnResponse, OperationEvent
 
-from contree_mcp.backend_types import (
-    ConsumedResources,
-    InstanceMetadata,
-    InstanceResult,
-    OperationKind,
-    OperationResponse,
-    OperationResult,
-    OperationStatus,
-    ProcessExitState,
-    Stream,
-)
 from contree_mcp.context import FILES_CACHE
+from contree_mcp.tools.get_operation import OperationOutput
 from contree_mcp.tools.run import run
-from tests.conftest import FakeResponse, FakeResponses, make_completion_event, make_sse_event
+from tests.conftest import make_instance_metadata, make_operation_response
 
 from . import TestCase
+
+
+def mock_wait_completes(contree_client, *, result_image: str, image: str, command: str = "echo hello") -> None:
+    """Arrange the mock double so wait_operation() observes a completed op.
+
+    wait_operation() drives follow_operation_events(), which consumes
+    iter_operation_events() until a "completion" event, then calls
+    get_operation_status() for the authoritative terminal result.
+    """
+    contree_client.mock(
+        "iter_operation_events",
+        [OperationEvent(id=1, ts="2024-01-01T00:00:00Z", type="completion", data={})],
+    )
+    contree_client.mock(
+        "get_operation_status",
+        make_operation_response(
+            uuid="op-1",
+            kind="instance",
+            status="SUCCESS",
+            metadata=make_instance_metadata(command=command, image=image, exit_code=0, stdout="hello world"),
+            result_image=result_image,
+        ),
+    )
 
 
 class TestRunCommandBasic(TestCase):
     """Test basic run_command functionality."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-run-123"},
-                headers=(("Location", "/v1/operations/op-run-123"),),
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_basic_command_wait_false(self) -> None:
+    async def test_basic_command_wait_false(self, contree_client) -> None:
         """Test basic command with wait=false returns operation_id."""
+        contree_client.mock("spawn_instance", InstanceSpawnResponse(uuid="op-run-123"))
+
         result = await run(command="echo hello", image="00000000-0000-0000-0000-000000000001", wait=False)
         assert isinstance(result, dict)
-        assert result.get("operation_id") is not None
+        assert result.get("operation_id") == "op-run-123"
 
 
 class TestRunCommandWithWait(TestCase):
-    """Test run_command with wait=true (completion signalled via SSE events)."""
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-wait-123"},
-                headers=(("Location", "/v1/operations/op-wait-123"),),
-            ),
-            "GET /operations/{uuid}/events": FakeResponse(
-                sse_events=[
-                    make_sse_event(1, "stdout", {"value": "hello world", "encoding": "ascii"}, spid=1),
-                    make_completion_event(2, result_image="img-result-wait"),
-                ]
-            ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-wait-123",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "echo hello",
-                        "image": "00000000-0000-0000-0000-000000000001",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="hello world", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=0.5),
-                        ),
-                    },
-                    "result": OperationResult(image="img-result-wait", tag=None),
-                }
-            ),
-        }
+    """Test run_command with wait=true (completion signalled via events)."""
 
     @pytest.mark.asyncio
-    async def test_command_with_wait_true(self) -> None:
-        """Test command with wait=true returns OperationResponse."""
+    async def test_command_with_wait_true(self, contree_client) -> None:
+        """Test command with wait=true returns OperationOutput."""
+        contree_client.mock("spawn_instance", InstanceSpawnResponse(uuid="op-wait-123"))
+        mock_wait_completes(
+            contree_client,
+            result_image="img-result-wait",
+            image="00000000-0000-0000-0000-000000000001",
+        )
+
         result = await run(command="echo hello", image="00000000-0000-0000-0000-000000000001", wait=True)
-        assert isinstance(result, OperationResponse)
-        assert result.status == OperationStatus.SUCCESS
-        assert isinstance(result.metadata, InstanceMetadata)
-        assert result.metadata.result.stdout.value == "hello world"
+        assert isinstance(result, OperationOutput)
+        assert result.status == "SUCCESS"
+        assert result.stdout == "hello world"
 
 
 class TestRunCommandWithDirectoryState(TestCase):
     """Test run_command with directory_state_id."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-ds-123"},
-                headers=(("Location", "/v1/operations/op-ds-123"),),
-            ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-ds-123",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "python /app/script.py",
-                        "image": "00000000-0000-0000-0000-000000000001",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="file executed", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=1.0),
-                        ),
-                    },
-                    "result": OperationResult(image="img-ds-result", tag=None),
-                }
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_with_directory_state(self) -> None:
+    async def test_with_directory_state(self, contree_client) -> None:
         """Test command with directory_state_id loads files."""
         files_cache = FILES_CACHE.get()
 
@@ -140,17 +84,25 @@ class TestRunCommandWithDirectoryState(TestCase):
         )
         await files_cache.conn.commit()
 
+        contree_client.mock("spawn_instance", InstanceSpawnResponse(uuid="op-ds-123"))
+        mock_wait_completes(
+            contree_client,
+            result_image="img-ds-result",
+            image="00000000-0000-0000-0000-000000000001",
+            command="python /app/script.py",
+        )
+
         result = await run(
             command="python /app/script.py",
             image="00000000-0000-0000-0000-000000000001",
             directory_state_id=ds_id,
             wait=True,
         )
-        assert isinstance(result, OperationResponse)
-        assert result.status == OperationStatus.SUCCESS
+        assert isinstance(result, OperationOutput)
+        assert result.status == "SUCCESS"
 
     @pytest.mark.asyncio
-    async def test_with_invalid_directory_state(self) -> None:
+    async def test_with_invalid_directory_state(self, contree_client) -> None:
         """Test command with invalid directory_state_id raises error."""
         with pytest.raises(ValueError, match="Directory state not found"):
             await run(
@@ -161,7 +113,7 @@ class TestRunCommandWithDirectoryState(TestCase):
             )
 
     @pytest.mark.asyncio
-    async def test_with_empty_directory_state(self) -> None:
+    async def test_with_empty_directory_state(self, contree_client) -> None:
         """Test command with empty directory_state raises error."""
         files_cache = FILES_CACHE.get()
 
@@ -185,19 +137,11 @@ class TestRunCommandWithDirectoryState(TestCase):
 class TestRunCommandWithFiles(TestCase):
     """Test run_command with files parameter."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-files-123"},
-                headers=(("Location", "/v1/operations/op-files-123"),),
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_with_files_param(self) -> None:
+    async def test_with_files_param(self, contree_client) -> None:
         """Test command with direct file UUIDs."""
+        contree_client.mock("spawn_instance", InstanceSpawnResponse(uuid="op-files-123"))
+
         result = await run(
             command="python /app/main.py",
             image="00000000-0000-0000-0000-000000000001",
@@ -205,53 +149,30 @@ class TestRunCommandWithFiles(TestCase):
             wait=False,
         )
         assert isinstance(result, dict)
-        assert result.get("operation_id") is not None
+        assert result.get("operation_id") == "op-files-123"
 
 
 class TestRunCommandLineage(TestCase):
     """Test run_command saves image lineage."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /instances": FakeResponse(
-                http_status=HTTPStatus.ACCEPTED,
-                body={"uuid": "op-lineage-123"},
-                headers=(("Location", "/v1/operations/op-lineage-123"),),
-            ),
-            "GET /operations/{uuid}": FakeResponse(
-                body={
-                    "uuid": "op-lineage-123",
-                    "kind": OperationKind.INSTANCE.value,
-                    "status": OperationStatus.SUCCESS.value,
-                    "created_at": "2024-01-01T00:00:00Z",
-                    "error": None,
-                    "metadata": {
-                        "command": "apt-get install -y python",
-                        "image": "00000000-0000-0000-0000-000000000002",
-                        "result": InstanceResult(
-                            state=ProcessExitState(exit_code=0, pid=1, timed_out=False),
-                            stdout=Stream(value="", encoding="ascii"),
-                            stderr=Stream(value="", encoding="ascii"),
-                            resources=ConsumedResources(elapsed_time=0.5),
-                        ),
-                    },
-                    # Different result_image to trigger lineage save
-                    "result": OperationResult(image="img-new-lineage", tag=None),
-                }
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_saves_image_lineage(self, general_cache) -> None:
+    async def test_saves_image_lineage(self, contree_client, general_cache) -> None:
         """Test that run_command saves image lineage when image changes."""
+        contree_client.mock("spawn_instance", InstanceSpawnResponse(uuid="op-lineage-123"))
+        mock_wait_completes(
+            contree_client,
+            result_image="img-new-lineage",
+            image="00000000-0000-0000-0000-000000000002",
+            command="apt-get install -y python",
+        )
+
         result = await run(
             command="apt-get install -y python",
             image="00000000-0000-0000-0000-000000000002",
             disposable=False,
             wait=True,
         )
-        assert isinstance(result, OperationResponse)
+        assert isinstance(result, OperationOutput)
 
         # Check that lineage was saved
         lineage_entry = await general_cache.get("image", "img-new-lineage")

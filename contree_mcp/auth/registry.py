@@ -1,32 +1,70 @@
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
 import re
 import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from http.client import HTTPConnection, HTTPSConnection
 from types import MappingProxyType
 from typing import cast
+from urllib.parse import urlencode, urlsplit
 
-import httpx
-from httpx import URL
 from pydantic import BaseModel, Field
 
 # Known registries and their PAT creation URLs
-KNOWN_REGISTRIES: Mapping[str, URL] = MappingProxyType(
+KNOWN_REGISTRIES: Mapping[str, str] = MappingProxyType(
     {
-        "docker.io": URL("https://app.docker.com/settings/personal-access-tokens"),
-        "ghcr.io": URL("https://github.com/settings/tokens?type=beta"),
-        "registry.gitlab.com": URL("https://gitlab.com/-/user_settings/personal_access_tokens"),
-        "gcr.io": URL("https://console.cloud.google.com/apis/credentials"),
-        "us.gcr.io": URL("https://console.cloud.google.com/apis/credentials"),
-        "eu.gcr.io": URL("https://console.cloud.google.com/apis/credentials"),
-        "asia.gcr.io": URL("https://console.cloud.google.com/apis/credentials"),
+        "docker.io": "https://app.docker.com/settings/personal-access-tokens",
+        "ghcr.io": "https://github.com/settings/tokens?type=beta",
+        "registry.gitlab.com": "https://gitlab.com/-/user_settings/personal_access_tokens",
+        "gcr.io": "https://console.cloud.google.com/apis/credentials",
+        "us.gcr.io": "https://console.cloud.google.com/apis/credentials",
+        "eu.gcr.io": "https://console.cloud.google.com/apis/credentials",
+        "asia.gcr.io": "https://console.cloud.google.com/apis/credentials",
     }
 )
 
 # Registry hostname aliases (some registries have different API hostnames)
 REGISTRY_API_HOSTS: Mapping[str, str] = MappingProxyType({"docker.io": "registry-1.docker.io"})
+
+
+def http_get(
+    url: str,
+    *,
+    params: Mapping[str, str] | None = None,
+    headers: Mapping[str, str] | None = None,
+    follow_redirects: bool = False,
+    max_redirects: int = 5,
+) -> tuple[int, Mapping[str, str], bytes]:
+    """Blocking GET via stdlib ``http.client``. Run through ``asyncio.to_thread``."""
+    for _ in range(max_redirects + 1):
+        parts = urlsplit(url)
+        if not parts.hostname:
+            raise ValueError(f"url has no hostname: {url!r}")
+        conn_cls = HTTPSConnection if parts.scheme == "https" else HTTPConnection
+        path = parts.path or "/"
+        if params:
+            path = f"{path}?{urlencode(params)}"
+        conn = conn_cls(parts.hostname, parts.port)
+        try:
+            conn.request("GET", path, headers=dict(headers or {}))
+            response = conn.getresponse()
+            body = response.read()
+            response_headers = dict(response.getheaders())
+        finally:
+            conn.close()
+        if follow_redirects and response.status in (301, 302, 303, 307, 308):
+            location = response_headers.get("Location")
+            if location:
+                url = location
+                params = None  # already folded into the redirect location
+                continue
+        return response.status, response_headers, body
+    raise ValueError(f"Too many redirects fetching {url!r}")
 
 
 @dataclass
@@ -68,9 +106,8 @@ class RegistryAuth:
         if "://" not in registry_url:
             return cls(registry="docker.io")
 
-        # Use httpx.URL for parsing
-        url = httpx.URL(registry_url)
-        return cls(registry=url.host or "docker.io")
+        host = urlsplit(registry_url).hostname
+        return cls(registry=host or "docker.io")
 
     @property
     def api_host(self) -> str:
@@ -86,8 +123,7 @@ class RegistryAuth:
 
         Returns None if registry is not in the known list.
         """
-        url = KNOWN_REGISTRIES.get(self.registry)
-        return str(url) if url is not None else None
+        return KNOWN_REGISTRIES.get(self.registry)
 
     @property
     def is_known(self) -> bool:
@@ -115,28 +151,29 @@ class RegistryAuth:
 
         url = f"https://{self.api_host}/v2/"
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, follow_redirects=True)
+        status, headers, _ = await asyncio.to_thread(http_get, url, follow_redirects=True)
+        if status == 401:
+            endpoint = self._parse_www_authenticate(headers.get("Www-Authenticate", ""))
+            if endpoint:
+                self._endpoint = endpoint
+                return endpoint
 
-            if response.status_code == 401:
-                www_auth = response.headers.get("Www-Authenticate", "")
-                endpoint = self._parse_www_authenticate(www_auth)
+        # If we get 200, try catalog request to get auth info
+        if status == 200:
+            catalog_url = f"https://{self.api_host}/v2/_catalog"
+            catalog_status, catalog_headers, _ = await asyncio.to_thread(http_get, catalog_url, follow_redirects=True)
+            if catalog_status == 401:
+                endpoint = self._parse_www_authenticate(catalog_headers.get("Www-Authenticate", ""))
                 if endpoint:
                     self._endpoint = endpoint
                     return endpoint
 
-            # If we get 200, try catalog request to get auth info
-            if response.status_code == 200:
-                catalog_url = f"https://{self.api_host}/v2/_catalog"
-                catalog_response = await client.get(catalog_url, follow_redirects=True)
-                if catalog_response.status_code == 401:
-                    www_auth = catalog_response.headers.get("Www-Authenticate", "")
-                    endpoint = self._parse_www_authenticate(www_auth)
-                    if endpoint:
-                        self._endpoint = endpoint
-                        return endpoint
-
         raise ValueError(f"Could not discover auth endpoint for registry {self.registry}")
+
+    @staticmethod
+    def _basic_auth_header(username: str, token: str) -> str:
+        credentials = base64.b64encode(f"{username}:{token}".encode()).decode("ascii")
+        return f"Basic {credentials}"
 
     async def validate_token(self, username: str, token: str) -> bool:
         """Validate token by requesting a token from the auth endpoint.
@@ -152,13 +189,13 @@ class RegistryAuth:
         except ValueError:
             return False
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                endpoint.realm,
-                params={"service": endpoint.service},
-                auth=httpx.BasicAuth(username, token),
-            )
-            return response.status_code == 200
+        status, _, _ = await asyncio.to_thread(
+            http_get,
+            endpoint.realm,
+            params={"service": endpoint.service},
+            headers={"Authorization": self._basic_auth_header(username, token)},
+        )
+        return status == 200
 
     async def get_bearer_token(self, username: str, token: str, scope: str) -> str | None:
         """Exchange stored PAT for a scoped registry bearer token.
@@ -178,15 +215,15 @@ class RegistryAuth:
             "scope": scope,
         }
 
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                endpoint.realm,
-                params=params,
-                auth=httpx.BasicAuth(username, token),
-            )
-            if response.status_code != 200:
-                return None
-            return cast(str | None, response.json().get("token"))
+        status, _, body = await asyncio.to_thread(
+            http_get,
+            endpoint.realm,
+            params=params,
+            headers={"Authorization": self._basic_auth_header(username, token)},
+        )
+        if status != 200:
+            return None
+        return cast(str | None, json.loads(body).get("token"))
 
     @staticmethod
     def _parse_www_authenticate(header: str) -> AuthEndpoint | None:

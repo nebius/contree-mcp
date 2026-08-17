@@ -193,7 +193,8 @@ class FileCache:
 
     async def _upload_file(self, client: ContreeClient, file_state: FileState) -> FileState:
         async with self.__upload_semaphore:
-            output = await client.upload_file(file_state.path.open("rb"))
+            with file_state.path.open("rb") as fh:
+                output = await client.ensure_file(fh)
         path_str = str(file_state.path)
         await self.conn.execute(
             """
@@ -337,19 +338,13 @@ class FileCache:
         files_with_hash: list[tuple[FileState, str]] = [(f, f.sha256) for f in synced_files if f.sha256 is not None]
 
         async def check_file(file_state: FileState, sha256: str) -> tuple[FileState, bool]:
-            exists = await client.check_file_exists_by_hash(sha256)
+            exists = await client.check_file_exists(sha256)
             return file_state, exists
 
         results = await asyncio.gather(*[check_file(f, h) for f, h in files_with_hash])
         stale_files = [(fs, h) for (fs, _exists), (_, h) in zip(results, files_with_hash, strict=True) if not _exists]
 
         if stale_files:
-            # Invalidate cache entries for stale files
-            for file_state, sha256 in stale_files:
-                await client.cache.delete("file_by_hash", sha256)
-                if file_state.uuid:
-                    await client.cache.delete("file_exists_by_uuid", file_state.uuid)
-
             # Re-upload stale files
             uploaded = await asyncio.gather(*[self._upload_file(client, f) for f, _ in stale_files])
 

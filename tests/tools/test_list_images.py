@@ -1,30 +1,27 @@
-from http import HTTPStatus
-
 import pytest
+from contree_client.exceptions import ServerError
+from contree_client.models import ImageListResponse
 
-from contree_mcp.backend_types import Image
+from contree_mcp.tools.get_image import ImageOutput
 from contree_mcp.tools.list_images import list_images
-from tests.conftest import FakeResponse, FakeResponses
+from tests.conftest import make_image
 
 from . import TestCase
 
 
 class TestListImagesHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(
-                body={
-                    "images": [
-                        Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z"),
-                        Image(uuid="img-2", tag=None, created_at="2024-01-01T00:00:00Z"),
-                    ]
-                }
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_basic_usage(self) -> None:
+    async def test_basic_usage(self, contree_client) -> None:
+        contree_client.mock(
+            "list_images",
+            ImageListResponse(
+                images=[
+                    make_image(uuid="img-1", tag="python:3.11"),
+                    make_image(uuid="img-2", tag=None),
+                ]
+            ),
+        )
+
         result = await list_images()
 
         assert len(result.images) == 2
@@ -34,38 +31,40 @@ class TestListImagesHappyPath(TestCase):
         assert result.images[1].tag is None
 
     @pytest.mark.asyncio
-    async def test_output_type_correct(self) -> None:
+    async def test_output_type_correct(self, contree_client) -> None:
+        contree_client.mock("list_images", ImageListResponse(images=[make_image(uuid="img-1")]))
+
         result = await list_images()
 
         assert isinstance(result.images, list)
         for img in result.images:
-            assert isinstance(img, Image)
+            assert isinstance(img, ImageOutput)
+
+    @pytest.mark.asyncio
+    async def test_tag_prefix_stripped_and_forwarded(self, contree_client) -> None:
+        contree_client.mock("list_images", ImageListResponse(images=[]))
+
+        await list_images(tagged=True, tag_prefix="common/./")
+
+        call = contree_client.calls_for("list_images")[0]
+        assert call.kwargs["tag"] == "common"
+        assert call.kwargs["tagged"] is True
 
 
 class TestListImagesEdgeCases(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(body={"images": []}),
-        }
-
     @pytest.mark.asyncio
-    async def test_empty_result(self) -> None:
+    async def test_empty_result(self, contree_client) -> None:
+        contree_client.mock("list_images", ImageListResponse(images=[]))
+
         result = await list_images()
+
         assert result.images == []
 
 
 class TestListImagesErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /images": FakeResponse(
-                http_status=HTTPStatus.INTERNAL_SERVER_ERROR,
-                body={"error": "API Error"},
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_api_error_propagated(self) -> None:
-        with pytest.raises(Exception):  # noqa: B017
+    async def test_api_error_propagated(self, contree_client) -> None:
+        contree_client.mock("list_images", error=ServerError(500, "API Error"))
+
+        with pytest.raises(ServerError):
             await list_images()

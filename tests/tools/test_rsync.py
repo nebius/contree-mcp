@@ -2,26 +2,21 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from contree_client.models import FileResponse
 
-from contree_mcp.backend_types import FileResponse
 from contree_mcp.tools.rsync import rsync
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
 
 class TestRsyncValidation(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {}
-
     @pytest.mark.asyncio
-    async def test_rejects_relative_source_path(self):
+    async def test_rejects_relative_source_path(self, contree_client):
         with pytest.raises(ValueError, match="absolute path"):
             await rsync(source="relative/path", destination="/app")
 
     @pytest.mark.asyncio
-    async def test_rejects_nonexistent_source_path(self, tmp_path: Path):
+    async def test_rejects_nonexistent_source_path(self, contree_client, tmp_path: Path):
         nonexistent = str(tmp_path / "nonexistent")
         with pytest.raises(ValueError, match="source path does not exist"):
             await rsync(source=nonexistent, destination="/app")
@@ -37,14 +32,10 @@ class TestRsync(TestCase):
             Path(tmpdir, "subdir", "module.py").write_text("class Foo: pass")
             yield tmpdir
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-123", sha256="abc123def456")),
-        }
-
     @pytest.mark.asyncio
-    async def test_basic_sync(self, temp_project_dir: str) -> None:
+    async def test_basic_sync(self, contree_client, temp_project_dir: str) -> None:
+        contree_client.mock("ensure_file", FileResponse(uuid="file-123", sha256="abc123def456", size=100))
+
         result = await rsync(
             source=temp_project_dir,
             destination="/app",
@@ -55,8 +46,10 @@ class TestRsync(TestCase):
         assert result > 0
 
     @pytest.mark.asyncio
-    async def test_sync_with_exclude_patterns(self, temp_project_dir: str) -> None:
+    async def test_sync_with_exclude_patterns(self, contree_client, temp_project_dir: str) -> None:
         """Test rsync works with exclude patterns - regression test for UNIQUE constraint bug."""
+        contree_client.mock("ensure_file", FileResponse(uuid="file-123", sha256="abc123def456", size=100))
+
         # First sync without exclude
         result1 = await rsync(
             source=temp_project_dir,
@@ -79,8 +72,10 @@ class TestRsync(TestCase):
         assert result1 != result2
 
     @pytest.mark.asyncio
-    async def test_sync_with_multiple_exclude_patterns(self, temp_project_dir: str) -> None:
+    async def test_sync_with_multiple_exclude_patterns(self, contree_client, temp_project_dir: str) -> None:
         """Test rsync with multiple exclude patterns."""
+        contree_client.mock("ensure_file", FileResponse(uuid="file-123", sha256="abc123def456", size=100))
+
         result = await rsync(
             source=temp_project_dir,
             destination="/app",
@@ -90,8 +85,10 @@ class TestRsync(TestCase):
         assert result > 0
 
     @pytest.mark.asyncio
-    async def test_repeated_sync_same_params_returns_same_id(self, temp_project_dir: str) -> None:
+    async def test_repeated_sync_same_params_returns_same_id(self, contree_client, temp_project_dir: str) -> None:
         """Test that repeated syncs with same params return same directory state."""
+        contree_client.mock("ensure_file", FileResponse(uuid="file-123", sha256="abc123def456", size=100))
+
         result1 = await rsync(
             source=temp_project_dir,
             destination="/app",

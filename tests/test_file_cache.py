@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import time
-from http import HTTPStatus
 from pathlib import Path
 
 import pytest
+from contree_client.models import FileResponse
 
-from contree_mcp.backend_types import FileResponse
 from contree_mcp.client import ContreeClient
 from contree_mcp.file_cache import DirectoryState, FileCache, FileState
-
-from .conftest import FakeResponse, FakeResponses
 
 
 @pytest.fixture
@@ -470,15 +467,9 @@ class TestFileCache:
 class TestSyncDirectory:
     """Tests for sync_directory method."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
-        }
-
     @pytest.fixture(autouse=True)
-    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
-        return contree_client
+    def _mock_ensure_file(self, contree_client: ContreeClient) -> None:
+        contree_client.mock("ensure_file", FileResponse(uuid="file-uuid-1", sha256="sha256hash", size=8))
 
     @pytest.mark.asyncio
     async def test_sync_new_directory(
@@ -678,16 +669,11 @@ class TestSyncDirectory:
 class TestRevalidation:
     """Tests for file revalidation after 24h."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
-            "HEAD /files": FakeResponse(http_status=HTTPStatus.NOT_FOUND),
-        }
-
     @pytest.fixture(autouse=True)
-    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
-        return contree_client
+    def _mock_client(self, contree_client: ContreeClient) -> None:
+        contree_client.mock("ensure_file", FileResponse(uuid="file-uuid-1", sha256="sha256hash", size=8))
+        # Server has "lost" every file, so revalidation must re-upload.
+        contree_client.mock("check_file_exists", False)
 
     @pytest.mark.asyncio
     async def test_revalidation_reuploads_stale_files(
@@ -873,16 +859,11 @@ class TestRevalidation:
 class TestRevalidationNoStaleFiles:
     """Tests for revalidation when server still has all files."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "POST /files": FakeResponse(body=FileResponse(uuid="file-uuid-1", sha256="sha256hash")),
-            "HEAD /files": FakeResponse(),  # 200 OK - files still exist on server
-        }
-
     @pytest.fixture(autouse=True)
-    def _contree_client(self, contree_client: ContreeClient) -> ContreeClient:
-        return contree_client
+    def _mock_client(self, contree_client: ContreeClient) -> None:
+        contree_client.mock("ensure_file", FileResponse(uuid="file-uuid-1", sha256="sha256hash", size=8))
+        # Server still has every file, so revalidation must not re-upload.
+        contree_client.mock("check_file_exists", True)
 
     @pytest.mark.asyncio
     async def test_revalidation_no_reupload_when_files_exist(

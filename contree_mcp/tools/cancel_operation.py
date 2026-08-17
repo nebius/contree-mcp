@@ -1,3 +1,6 @@
+from types import EllipsisType
+
+from contree_client.models import OperationStatus
 from pydantic import BaseModel, Field
 
 from contree_mcp.context import CLIENT
@@ -27,10 +30,10 @@ async def cancel_operation(operation_id: str) -> CancelOperationOutput:
     """
 
     client = CLIENT.get()
-    result_status = await client.cancel_operation(operation_id)
-    # Check if operation was cancelled (CANCELLED status)
-    cancelled = result_status == "CANCELLED"
-    return CancelOperationOutput(
-        cancelled=cancelled,
-        operation_id=operation_id,
-    )
+    current = await client.get_operation_status(operation_id)
+    status = current.status
+    if not isinstance(status, EllipsisType) and status.is_terminal():
+        return CancelOperationOutput(cancelled=status == OperationStatus.CANCELLED, operation_id=operation_id)
+
+    await client.cancel_operation(operation_id)
+    return CancelOperationOutput(cancelled=True, operation_id=operation_id)

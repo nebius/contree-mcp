@@ -4,12 +4,13 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import OperationKind, OperationResponse, OperationStatus
 from contree_mcp.context import CLIENT
+from contree_mcp.lineage import record_lineage
+from contree_mcp.tools.get_operation import OperationOutput, operation_output
 
 
 class WaitOperationsOutput(BaseModel):
-    results: dict[str, OperationResponse] = Field(description="Map of operation_id to result")
+    results: dict[str, OperationOutput] = Field(description="Map of operation_id to result")
     completed: list[str] = Field(description="List of completed operation IDs")
     cancelled: list[str] = Field(description="List of timed out and cancelled operation IDs")
     timed_out: bool = Field(default=False, description="True if wait exceeded timeout")
@@ -41,21 +42,17 @@ async def wait_operations(
 
     client = CLIENT.get()
 
-    results: dict[str, OperationResponse] = {}
+    results: dict[str, OperationOutput] = {}
 
     async def wait_one(op_id: str) -> None:
         nonlocal results
         try:
-            result = await client.wait_for_operation(op_id, max_wait=timeout)
-            results[op_id] = result
+            op = await client.wait_operation(op_id, timeout=timeout)
+            await record_lineage(client.cache, op)
+            results[op_id] = operation_output(op)
         except Exception as e:
             # On error (timeout, connection error, etc.), mark as failed
-            results[op_id] = OperationResponse(
-                uuid=op_id,
-                status=OperationStatus.FAILED,
-                kind=OperationKind.INSTANCE,
-                error=str(e),
-            )
+            results[op_id] = OperationOutput(uuid=op_id, status="FAILED", kind="instance", error=str(e))
 
     done, pending = await asyncio.wait(
         list(map(asyncio.create_task, map(wait_one, set(operation_ids)))),

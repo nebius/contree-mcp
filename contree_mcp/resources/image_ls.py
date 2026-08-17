@@ -1,6 +1,18 @@
+import stat
+from datetime import datetime, timezone
 from urllib.parse import unquote
 
+from contree_client.models import FileItem
+
 from contree_mcp.context import CLIENT
+
+
+def format_entry(entry: FileItem) -> str:
+    timestamp = datetime.fromtimestamp(entry.mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    name = entry.path
+    if entry.is_symlink and entry.symlink_to:
+        name = f"{name} -> {entry.symlink_to}"
+    return f"{stat.filemode(entry.mode)} {entry.size:>10} {timestamp} {name}"
 
 
 async def image_ls(image: str, path: str) -> str:
@@ -29,4 +41,5 @@ async def image_ls(image: str, path: str) -> str:
     decoded_path = unquote(path)
     image_uuid = await client.resolve_image(decoded_image)
     dir_path = "/" if decoded_path in (".", "") else "/" + decoded_path
-    return await client.list_directory_text(image_uuid, dir_path)
+    listing = await client.inspect_image_list(image_uuid, dir_path)
+    return "\n".join(format_entry(entry) for entry in listing.files)

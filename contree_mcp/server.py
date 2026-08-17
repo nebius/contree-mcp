@@ -10,7 +10,7 @@ from starlette.responses import HTMLResponse
 from contree_mcp.app import create_mcp_app
 from contree_mcp.arguments import Parser, ServerMode
 from contree_mcp.cache import Cache
-from contree_mcp.client import ContreeClient
+from contree_mcp.client import client_from_profile
 from contree_mcp.config import AuthType, Config
 from contree_mcp.context import CLIENT, FILES_CACHE, ContextMiddleware
 from contree_mcp.docs import generate_docs_html
@@ -75,7 +75,7 @@ async def amain(parser: Parser) -> None:
             )
         )
         client = await stack.enter_async_context(
-            ContreeClient.from_profile(profile, cache=general_cache),
+            client_from_profile(profile, cache=general_cache),
         )
 
         CLIENT.set(client)

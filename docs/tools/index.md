@@ -4,7 +4,7 @@ icon: screwdriver-wrench
 
 # Tools Reference
 
-All 17 tools for container execution, file management, and operations.
+All 18 tools for container execution, file management, and operations.
 
 ```{toctree}
 :maxdepth: 1
@@ -21,6 +21,7 @@ upload
 download
 list_files
 read_file
+grep
 get_operation
 list_operations
 wait_operations
@@ -61,6 +62,7 @@ get_guide
 |------|-------------|------|
 | {doc}`list_files` | List files in image | No VM |
 | {doc}`read_file` | Read file from image | No VM |
+| {doc}`grep` | Search file contents via ripgrep | No VM |
 
 ### Operations
 
