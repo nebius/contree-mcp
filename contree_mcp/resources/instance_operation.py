@@ -1,6 +1,8 @@
 import json
+from types import EllipsisType
 
-from contree_mcp.backend_types import InstanceMetadata, OperationKind
+from contree_client.models import OperationInstanceMetadata
+
 from contree_mcp.context import CLIENT
 
 
@@ -21,32 +23,38 @@ async def instance_operation(operation_id: str) -> str:
     Example: contree://operations/instance/op-abc-123-def
     """
     client = CLIENT.get()
-    # Use get_operation which checks cache first, then fetches from API
-    op = await client.get_operation(operation_id)
+    op = await client.get_operation_status(operation_id)
 
-    if op.kind != OperationKind.INSTANCE:
+    if op.kind != "instance":
         raise ValueError(f"Operation {operation_id} is not an instance operation (kind={op.kind})")
 
     result_data: dict[str, object] = {
-        "state": op.status.value,
+        "state": str(op.status),
     }
 
     if op.error:
         result_data["error"] = op.error
 
-    if op.result:
-        result_data["result_image"] = op.result.image
-        if op.result.tag:
-            result_data["result_tag"] = op.result.tag
+    op_result = op.result
+    if not isinstance(op_result, EllipsisType) and op_result is not None:
+        result_data["result_image"] = op_result.image
+        if op_result.tag:
+            result_data["result_tag"] = op_result.tag
 
     # Extract instance-specific metadata
-    if isinstance(op.metadata, InstanceMetadata) and op.metadata.result:
+    if isinstance(op.metadata, OperationInstanceMetadata):
         instance_result = op.metadata.result
-        result_data["exit_code"] = instance_result.state.exit_code
-        result_data["timed_out"] = instance_result.state.timed_out
-        result_data["stdout"] = instance_result.stdout.text() if instance_result.stdout else ""
-        result_data["stderr"] = instance_result.stderr.text() if instance_result.stderr else ""
-        if instance_result.resources:
-            result_data["resources"] = instance_result.resources.model_dump()
+        if not isinstance(instance_result, EllipsisType) and instance_result is not None:
+            state = instance_result.state
+            if not isinstance(state, EllipsisType) and state is not None:
+                result_data["exit_code"] = state.exit_code
+                result_data["timed_out"] = state.timed_out
+            stdout = instance_result.stdout
+            result_data["stdout"] = stdout.as_text() if not isinstance(stdout, EllipsisType) and stdout else ""
+            stderr = instance_result.stderr
+            result_data["stderr"] = stderr.as_text() if not isinstance(stderr, EllipsisType) and stderr else ""
+            resources = instance_result.resources
+            if not isinstance(resources, EllipsisType) and resources is not None:
+                result_data["resources"] = resources.to_dict()
 
     return json.dumps(result_data, indent=2)

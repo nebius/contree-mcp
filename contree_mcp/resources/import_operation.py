@@ -1,4 +1,7 @@
-from contree_mcp.backend_types import ImportImageMetadata, OperationKind
+from types import EllipsisType
+
+from contree_client.models import ImageImportMetadata
+
 from contree_mcp.context import CLIENT
 
 
@@ -29,20 +32,23 @@ async def import_operation(operation_id: str) -> str:
     REGISTRY_URL: registry.example.com/repo/image:tag
     """
     client = CLIENT.get()
-    op = await client.get_operation(operation_id)
-    if op.kind != OperationKind.IMAGE_IMPORT:
+    op = await client.get_operation_status(operation_id)
+    if op.kind != "image_import":
         raise ValueError(f"Operation {operation_id} is not an import operation (kind={op.kind})")
 
-    result = f"STATE: {op.status.value}"
+    result = f"STATE: {op.status}"
 
-    if op.result and op.result.image:
-        result += f"\nRESULT_IMAGE: {op.result.image}"
-    if op.result and op.result.tag:
-        result += f"\nRESULT_TAG: {op.result.tag}"
+    op_result = op.result
+    if not isinstance(op_result, EllipsisType) and op_result is not None:
+        if op_result.image:
+            result += f"\nRESULT_IMAGE: {op_result.image}"
+        if op_result.tag:
+            result += f"\nRESULT_TAG: {op_result.tag}"
 
     # Extract registry URL from metadata
-    if isinstance(op.metadata, ImportImageMetadata):
-        registry_url = str(op.metadata.registry.url) if op.metadata.registry else None
+    if isinstance(op.metadata, ImageImportMetadata):
+        registry = op.metadata.registry
+        registry_url = registry.url if not isinstance(registry, EllipsisType) else None
         if registry_url:
             result += f"\nREGISTRY_URL: {registry_url}"
 

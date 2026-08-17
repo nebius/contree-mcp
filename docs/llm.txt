@@ -11,7 +11,7 @@ Key Rules:
 3. Use `disposable=false` only when you need to save state (installs, builds)
 4. For parallel execution: `wait=false` then `wait_operations`
 5. Use `env` parameter for environment variables, not shell export
-6. Use `list_files`/`read_file` instead of `run("ls")`/`run("cat")` for free inspection
+6. Use `list_files`/`read_file`/`grep` instead of `run("ls")`/`run("cat")`/`run("grep")` for free inspection
 
 For detailed patterns, access via MCP resources:
 - `contree://guide/workflow` - Complete workflow patterns

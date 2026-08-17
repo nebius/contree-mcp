@@ -1,13 +1,20 @@
 import base64
 import os
 
-from contree_mcp.backend_types import FileResponse
+from pydantic import BaseModel, Field
+
 from contree_mcp.context import CLIENT
+
+
+class UploadOutput(BaseModel):
+    uuid: str = Field(description="File UUID")
+    sha256: str = Field(description="SHA256 hash of file content")
+    size: int = Field(description="File size in bytes")
 
 
 async def upload(
     path: str | None = None, content: str | None = None, content_base64: str | None = None
-) -> FileResponse:
+) -> UploadOutput:
     """
     Upload file to Contree for use in containers. Free (no VM).
 
@@ -41,12 +48,12 @@ async def upload(
 
     if path:
         with open(path, "rb") as f:
-            result = await client.upload_file(f)
-        return FileResponse(uuid=result.uuid, sha256=result.sha256)
+            result = await client.ensure_file(f)
+        return UploadOutput(uuid=result.uuid, sha256=result.sha256, size=result.size)
     elif content_base64:
         data = base64.b64decode(content_base64)
     else:
         data = content.encode("utf-8")  # type: ignore[union-attr]
 
-    result = await client.upload_file(data)
-    return FileResponse(uuid=result.uuid, sha256=result.sha256)
+    result = await client.ensure_file(data)
+    return UploadOutput(uuid=result.uuid, sha256=result.sha256, size=result.size)

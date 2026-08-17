@@ -3,20 +3,16 @@ import tempfile
 from pathlib import Path
 
 import pytest
+from contree_client.exceptions import NotFoundError
 
 from contree_mcp.tools.download import DownloadOutput, download
-from tests.conftest import FakeResponse, FakeResponses
 
 from . import TestCase
 
 
 class TestDownloadValidation(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {}
-
     @pytest.mark.asyncio
-    async def test_rejects_relative_destination_path(self):
+    async def test_rejects_relative_destination_path(self, contree_client):
         with pytest.raises(ValueError, match="absolute path"):
             await download(
                 image="00000000-0000-0000-0000-000000000001", path="/app/file.txt", destination="relative/path"
@@ -24,14 +20,10 @@ class TestDownloadValidation(TestCase):
 
 
 class TestDownloadHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "GET /inspect/{uuid}/download": FakeResponse(body="file content here"),
-        }
-
     @pytest.mark.asyncio
-    async def test_basic_download(self) -> None:
+    async def test_basic_download(self, contree_client) -> None:
+        contree_client.mock("inspect_image_download_stream", [b"file content here"])
+
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = f"{tmpdir}/downloaded.txt"
 
@@ -47,9 +39,12 @@ class TestDownloadHappyPath(TestCase):
             assert Path(result.destination) == Path(dest)
             assert result.executable is False
             assert Path(dest).exists()
+            assert Path(dest).read_bytes() == b"file content here"
 
     @pytest.mark.asyncio
-    async def test_download_executable(self) -> None:
+    async def test_download_executable(self, contree_client) -> None:
+        contree_client.mock("inspect_image_download_stream", [b"#!/bin/sh\necho hi"])
+
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = f"{tmpdir}/script.sh"
 
@@ -66,7 +61,9 @@ class TestDownloadHappyPath(TestCase):
                 assert mode & 0o100  # User execute bit
 
     @pytest.mark.asyncio
-    async def test_download_creates_parent_dirs(self) -> None:
+    async def test_download_creates_parent_dirs(self, contree_client) -> None:
+        contree_client.mock("inspect_image_download_stream", [b"content"])
+
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = f"{tmpdir}/nested/deep/path/file.txt"
 
@@ -80,7 +77,9 @@ class TestDownloadHappyPath(TestCase):
             assert Path(dest).exists()
 
     @pytest.mark.asyncio
-    async def test_output_type_correct(self) -> None:
+    async def test_output_type_correct(self, contree_client) -> None:
+        contree_client.mock("inspect_image_download_stream", [b"content"])
+
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = f"{tmpdir}/file.txt"
 
@@ -97,20 +96,11 @@ class TestDownloadHappyPath(TestCase):
 
 
 class TestDownloadErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        from http import HTTPStatus
-
-        return {
-            "GET /inspect/{uuid}/download": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "File not found"},
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_partial_file_deleted_on_error(self) -> None:
+    async def test_partial_file_deleted_on_error(self, contree_client) -> None:
         """Partial file should be deleted if download fails."""
+        contree_client.mock("inspect_image_download_stream", [], error=NotFoundError(404, "File not found"))
+
         with tempfile.TemporaryDirectory() as tmpdir:
             dest = f"{tmpdir}/partial.txt"
 

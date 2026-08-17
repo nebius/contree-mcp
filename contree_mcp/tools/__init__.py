@@ -5,6 +5,7 @@ from .download import download
 from .get_guide import get_guide
 from .get_image import get_image
 from .get_operation import get_operation
+from .grep import grep
 from .import_image import import_image
 from .list_files import list_files
 from .list_images import list_images
@@ -25,6 +26,7 @@ __all__ = [
     "get_guide",
     "get_image",
     "get_operation",
+    "grep",
     "import_image",
     "list_files",
     "list_images",

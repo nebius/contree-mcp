@@ -13,6 +13,7 @@
 | `download` | Pull a file out of an image | `image`, `path`, `destination` | local file | Free |
 | `list_files` | List files in an image (no VM) | `image`, `path` | entries[] | Free |
 | `read_file` | Read a file from an image | `image`, `path` | bytes / text | Free |
+| `grep` | Search file contents via ripgrep (no VM) | `image`, `pattern`, `path`, `glob` | matches[] | Free |
 | `get_operation` | Poll a single operation | `operation_id` | operation | Free |
 | `list_operations` | List operations | `status`, `kind`, `since`, `until` | operations[] | Free |
 | `wait_operations` | Wait for several operations | `operation_ids`, `mode` | results | Free |
@@ -100,13 +101,18 @@ Pull an OCI image from a registry. Async (returns
 For private registries, run `registry_token_obtain` followed by
 `registry_auth` once per registry.
 
-## list_files / read_file
+## list_files / read_file / grep
 
 Inspect images without spawning a VM:
   - `list_files(image, path)` → entries with `path`, `size`,
     `mode`, `is_dir`, `is_symlink`, ...
   - `read_file(image, path)` → file bytes (text-decoded when
-    possible). Prefer these over `run("ls ...")` / `run("cat ...")`.
+    possible).
+  - `grep(image, pattern, path, glob, case)` → matching lines via
+    ripgrep, with `path`, `line_number`, `line_text` per match.
+    `pattern` is a regex (Rust syntax), not a plain substring.
+
+Prefer these over `run("ls ...")` / `run("cat ...")` / `run("grep ...")`.
 
 ## whoami
 

@@ -1,4 +1,13 @@
-"""Integration tests for HTTP server with real ContreeClient."""
+"""Integration tests for the HTTP server, with the Contree backend faked.
+
+The MCP server itself (FastMCP app, uvicorn, streamable-HTTP transport)
+runs for real; only the simulated backend is replaced, via the
+``contree_client`` fixture's in-memory test double (see
+``tests/conftest.py``). Context propagation into the running app
+mirrors production (``contree_mcp.server.amain``): the CLIENT/
+FILES_CACHE contextvars are captured with ``contextvars.copy_context()``
+and restored per-request by ``ContextMiddleware``.
+"""
 
 import asyncio
 import contextlib
@@ -7,7 +16,7 @@ import os
 import socket
 import sys
 from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack
+from contextvars import copy_context
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
@@ -15,20 +24,15 @@ from pathlib import Path
 import httpx
 import pytest
 import uvicorn
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
+from contree_client.models import ImageListResponse
 
 from contree_mcp.app import create_mcp_app
 from contree_mcp.arguments import Parser
-from contree_mcp.backend_types import Image
-from contree_mcp.cache import Cache
-from contree_mcp.client import ContreeClient
-from contree_mcp.context import CLIENT, FILES_CACHE
+from contree_mcp.context import ContextMiddleware
 from contree_mcp.docs import generate_docs_html
-from contree_mcp.file_cache import FileCache
 from contree_mcp.resources.guide import SECTIONS
 from contree_mcp.server import amain, index_page
-from tests.conftest import FakeResponse, FakeResponses
+from tests.conftest import FakeContreeClient, make_image
 
 # MCP requires explicit Accept header for JSON responses
 MCP_HEADERS = {
@@ -81,7 +85,7 @@ class HTTPServer:
 
     port: int
     base_url: str
-    contree_client: ContreeClient
+    contree_client: FakeContreeClient
     server_task: asyncio.Task
     server: uvicorn.Server
 
@@ -116,83 +120,72 @@ def test_parser(tmp_path: Path, mcp_server_socket: socket.socket) -> Parser:
 async def http_server(
     test_parser: Parser,
     mcp_server_socket: socket.socket,
-    http_fake_server: None,
-    fake_server_url: str,
+    contree_client: FakeContreeClient,
 ) -> AsyncIterator[HTTPServer]:
-    """Start HTTP server with real ContreeClient and real caches for testing."""
+    """Start the real MCP HTTP server, backed by the faked Contree client.
+
+    ``contree_client`` (from ``tests/conftest.py``) already set the
+    CLIENT/FILES_CACHE contextvars in this fixture's context. Mirror
+    production (``contree_mcp.server.amain``): snapshot that context
+    with ``copy_context()`` and restore it per-request via
+    ``ContextMiddleware``, since uvicorn runs each request in a fresh
+    context.
+    """
     _, port = mcp_server_socket.getsockname()
 
-    async with AsyncExitStack() as stack:
-        # Create real caches and client pointing to fake server
-        files_cache = await stack.enter_async_context(FileCache(db_path=test_parser.cache.files.expanduser()))
-        general_cache = await stack.enter_async_context(Cache(db_path=test_parser.cache.general.expanduser()))
-        client = await stack.enter_async_context(
-            ContreeClient(base_url=fake_server_url, token="test-token", cache=general_cache)
-        )
+    # Create MCP app
+    mcp = create_mcp_app()
 
-        # Middleware to set context variables for each request
-        class ContextMiddleware(BaseHTTPMiddleware):
-            async def dispatch(self, request: Request, call_next):
-                CLIENT.set(client)
-                FILES_CACHE.set(files_cache)
-                return await call_next(request)
+    # Generate docs HTML
+    tools = await mcp.list_tools()
+    templates = await mcp.list_resource_templates()
+    docs_html = generate_docs_html(
+        server_instructions=mcp.instructions or "",
+        tools=tools,
+        templates=templates,
+        guides=SECTIONS,
+        http_port=test_parser.http.port,
+    )
 
-        # Create MCP app
-        mcp = create_mcp_app()
+    app = mcp.streamable_http_app()
+    app.add_middleware(ContextMiddleware, ctx=copy_context())
+    app.add_route("/", partial(index_page, docs_html), methods=["GET"])
 
-        # Generate docs HTML
-        tools = await mcp.list_tools()
-        templates = await mcp.list_resource_templates()
-        docs_html = generate_docs_html(
-            server_instructions=mcp.instructions or "",
-            tools=tools,
-            templates=templates,
-            guides=SECTIONS,
-            http_port=test_parser.http.port,
-        )
+    config = uvicorn.Config(app, log_level="error")
+    server = uvicorn.Server(config)
 
-        app = mcp.streamable_http_app()
-        app.add_middleware(ContextMiddleware)
-        app.add_route("/", partial(index_page, docs_html), methods=["GET"])
+    # Start server with pre-bound socket
+    server_task = asyncio.create_task(server.serve(sockets=[mcp_server_socket]))
 
-        config = uvicorn.Config(app, log_level="error")
-        server = uvicorn.Server(config)
+    yield HTTPServer(
+        port=port,
+        base_url=f"http://127.0.0.1:{port}",
+        contree_client=contree_client,
+        server_task=server_task,
+        server=server,
+    )
 
-        # Start server with pre-bound socket
-        server_task = asyncio.create_task(server.serve(sockets=[mcp_server_socket]))
-
-        yield HTTPServer(
-            port=port,
-            base_url=f"http://127.0.0.1:{port}",
-            contree_client=client,
-            server_task=server_task,
-            server=server,
-        )
-
-        # Shutdown server
-        server.should_exit = True
-        await server_task
+    # Shutdown server
+    server.should_exit = True
+    await server_task
 
 
 class TestHTTPServerIntegration:
     """Integration tests for the HTTP server."""
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        """Fake responses for HTTP server integration tests."""
-        return {
-            "GET /images": FakeResponse(
-                body={
-                    "images": [
-                        Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z"),
-                        Image(uuid="img-2", tag=None, created_at="2024-01-01T00:00:00Z"),
-                    ]
-                }
+    @pytest.fixture(autouse=True)
+    def _mock_backend(self, contree_client: FakeContreeClient) -> None:
+        """Fake backend responses for HTTP server integration tests."""
+        contree_client.mock(
+            "list_images",
+            ImageListResponse(
+                images=[
+                    make_image(uuid="img-1", tag="python:3.11"),
+                    make_image(uuid="img-2", tag=None),
+                ]
             ),
-            "GET /inspect/{uuid}/": FakeResponse(
-                body=Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z")
-            ),
-        }
+        )
+        contree_client.mock("inspect_image", make_image(uuid="img-1", tag="python:3.11"))
 
     @pytest.mark.asyncio
     async def test_docs_page_returns_html(self, http_server: HTTPServer) -> None:
@@ -388,22 +381,17 @@ class TestHTTPServerIntegration:
 
 
 class TestAmainHTTPMode:
-    """Tests for server.amain in HTTP mode."""
+    """Tests for server.amain in HTTP mode.
 
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        """Fake responses for amain tests."""
-        return {
-            "GET /images": FakeResponse(body={"images": []}),
-        }
+    ``amain`` builds its own real ``ContreeClient`` from the profile
+    (see ``client_from_profile``), so it can't use the ``contree_client``
+    fixture's fake double. That's fine here: this test only exercises
+    startup, the docs page, and MCP ``initialize`` — none of which make
+    a backend HTTP call — so the client never actually dials ``--url``.
+    """
 
     @pytest.mark.asyncio
-    async def test_amain_http_mode_starts_server(
-        self,
-        tmp_path: Path,
-        http_fake_server: None,
-        fake_server_url: str,
-    ) -> None:
+    async def test_amain_http_mode_starts_server(self, tmp_path: Path) -> None:
         """Test that amain starts HTTP server and serves requests."""
         # Find free port
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -414,7 +402,7 @@ class TestAmainHTTPMode:
 
         parser = Parser().parse_args(
             [
-                f"--url={fake_server_url}",
+                "--url=http://localhost:9999",
                 "--token=test-token",
                 "--auth-type=jwt",
                 "--mode=http",
@@ -578,16 +566,11 @@ class TestAmainInvalidMode:
     """Tests for server.amain with invalid mode."""
 
     @pytest.mark.asyncio
-    async def test_amain_invalid_mode_raises(
-        self,
-        tmp_path: Path,
-        http_fake_server: None,
-        fake_server_url: str,
-    ) -> None:
+    async def test_amain_invalid_mode_raises(self, tmp_path: Path) -> None:
         """Test that invalid mode raises ValueError."""
         parser = Parser().parse_args(
             [
-                f"--url={fake_server_url}",
+                "--url=http://localhost:9999",
                 "--token=test-token",
                 "--auth-type=jwt",
                 f"--cache-files={tmp_path / 'files.db'}",
@@ -599,7 +582,3 @@ class TestAmainInvalidMode:
 
         with pytest.raises(ValueError, match="Unsupported server mode"):
             await amain(parser)
-
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {}

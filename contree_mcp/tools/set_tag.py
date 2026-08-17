@@ -1,8 +1,9 @@
-from contree_mcp.backend_types import Image
 from contree_mcp.context import CLIENT
 
+from .get_image import ImageOutput, image_output
 
-async def set_tag(image_uuid: str, tag: str | None = None) -> Image:
+
+async def set_tag(image_uuid: str, tag: str | None = None) -> ImageOutput:
     """
     Set or remove tag for container image. Free (no VM).
     TL;DR:
@@ -25,7 +26,8 @@ async def set_tag(image_uuid: str, tag: str | None = None) -> Image:
     """
     client = CLIENT.get()
     if tag:
-        img = await client.tag_image(image_uuid=image_uuid, tag=tag)
+        img = await client.update_image_tag(image_uuid, tag)
     else:
-        img = await client.untag_image(image_uuid=image_uuid)
-    return Image(uuid=img.uuid, tag=img.tag, created_at=img.created_at)
+        await client.delete_image_tag(image_uuid)
+        img = await client.inspect_image(image_uuid)
+    return image_output(img)

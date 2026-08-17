@@ -1,6 +1,7 @@
+from types import EllipsisType
+
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import WhoAmIResponse
 from contree_mcp.context import CLIENT
 from contree_mcp.update_check import update_checker
 
@@ -15,8 +16,8 @@ class MCPUpgradeHint(BaseModel):
     )
 
 
-class WhoAmIOutput(WhoAmIResponse):
-    """``WhoAmIResponse`` plus a local upgrade hint for the MCP itself.
+class WhoAmIOutput(BaseModel):
+    """Token introspection plus a local upgrade hint for the MCP itself.
 
     The hint surfaces ``contree-mcp``'s own update-check state to agents
     that never see the WARNING line emitted at server startup — they
@@ -26,6 +27,14 @@ class WhoAmIOutput(WhoAmIResponse):
     installed from a distribution (running from source).
     """
 
+    token_uuid: str = Field(description="UUID of the authentication token")
+    token_expiration: int | None = Field(
+        default=None,
+        description="Token expiration time as Unix timestamp, or null if not set",
+    )
+    permissions: dict[str, bool] = Field(default_factory=dict)
+    limits: dict[str, int] = Field(default_factory=dict)
+    operations_stat: dict[str, int] = Field(default_factory=dict)
     mcp_version: str = Field(description="Installed contree-mcp version")
     mcp_upgrade: MCPUpgradeHint | None = Field(
         default=None,
@@ -71,8 +80,14 @@ async def whoami() -> WhoAmIOutput:
             command="uv tool install -U contree-mcp  # or: pip install -U contree-mcp",
         )
 
+    limits = response.limits if not isinstance(response.limits, EllipsisType) else {}
+
     return WhoAmIOutput(
-        **response.model_dump(),
+        token_uuid=response.token_uuid,
+        token_expiration=response.token_expiration,
+        permissions=response.permissions,
+        limits=limits,
+        operations_stat=response.operations_stat,
         mcp_version=update_checker.current_version,
         mcp_upgrade=upgrade,
     )
