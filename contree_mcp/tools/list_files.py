@@ -52,11 +52,7 @@ async def list_files(image: str, path: str = "/") -> ListFilesOutput:
     if path == "/.":
         path = "/"
 
-    listing = await client.list_directory(image_uuid, path)
-
-    # Handle text response (shouldn't happen with as_text=False default)
-    if isinstance(listing, str):
-        return ListFilesOutput(path=path, count=0, files=[])
+    listing = await client.inspect_image_list(image_uuid, path)
 
     files = []
     for f in listing.files:

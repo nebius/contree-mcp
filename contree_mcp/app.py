@@ -43,8 +43,8 @@ or read the matching resource URI: `contree://guide/<section>`.
   read-only checks and exit-code probes; switch to `disposable=false`
   the moment you want to keep the result. (CLI users: this is the
   opposite of `contree run`'s default.)
-- Prefer `list_files` / `read_file` over `run("ls ...")` /
-  `run("cat ...")` — they're free and avoid spawning a microVM.
+- Prefer `list_files` / `read_file` / `grep` over `run("ls ...")` /
+  `run("cat ...")` / `run("grep ...")` — they're free and avoid spawning a microVM.
 - Local files are NOT visible in the sandbox unless attached via
   `rsync` (directory) or `upload` (single file).
 - Tag images you intend to reuse. Untagged images are only reachable
@@ -64,7 +64,7 @@ or read the matching resource URI: `contree://guide/<section>`.
 | `rsync` | Stage a local directory tree |
 | `upload` | Stage a single local file |
 | `download` | Pull a file out of an image |
-| `list_files` / `read_file` | Inspect an image without a VM |
+| `list_files` / `read_file` / `grep` | Inspect an image without a VM |
 | `get_operation` / `list_operations` / `wait_operations` / `cancel_operation` | Async operation management |
 | `whoami` | Token introspection (permissions, limits) |
 | `registry_token_obtain` / `registry_auth` | One-time private-registry setup |
@@ -240,6 +240,7 @@ def create_mcp_app(**kwargs: Any) -> FastMCP:
     # some agents can not use resources, so we expose these as tools too
     register_tool(mcp, tools.list_files)
     register_tool(mcp, tools.read_file)
+    register_tool(mcp, tools.grep)
     register_tool(mcp, tools.get_guide)
 
     mcp.add_prompt(Prompt.from_function(prompts.prepare_environment, name="prepare-environment"))

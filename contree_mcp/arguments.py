@@ -3,7 +3,7 @@ from pathlib import Path
 
 import argclass
 
-from .client import MCP_USER_AGENT
+from .client import MCP_IDENTITY
 from .config import CONTREE_HOME, AuthType
 
 # Co-locate MCP caches with auth.ini and the update-check state under
@@ -117,8 +117,8 @@ class Parser(argclass.Parser):
         "-V",
         "--version",
         action=argclass.Actions.VERSION,
-        version=MCP_USER_AGENT,
-        help="Print the MCP version, some OS and platform info and exit",
+        version=MCP_IDENTITY,
+        help="Print the MCP version and exit",
     )
 
     log_level: int = argclass.LogLevel

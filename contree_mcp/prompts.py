@@ -161,7 +161,7 @@ def inspect_image(image: str) -> str:
         Inspect the container image `{image}`.
 
         1. Prefer no-VM tools:
-           `list_files(image=...)` and `read_file(image=...)`.
+           `list_files(image=...)`, `read_file(image=...)`, and `grep(image=..., pattern=...)`.
         2. If you need commands, use `run` with `disposable=true`
            (e.g., `cat /etc/os-release`, `which python`).
         """

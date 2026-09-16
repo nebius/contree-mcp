@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -319,41 +319,35 @@ class TestIsLatest:
 
 class TestFetchLatestVersion:
     @staticmethod
-    def fake_response(payload, status_code: int = 200):
-        import httpx
-
-        return httpx.Response(
-            status_code,
-            content=json.dumps(payload).encode(),
-            request=httpx.Request("GET", "https://pypi.org/pypi/contree-mcp/json"),
-        )
+    def fake_connection(payload, status: int = 200):
+        response = MagicMock()
+        response.status = status
+        response.read.return_value = json.dumps(payload).encode()
+        conn = MagicMock()
+        conn.getresponse.return_value = response
+        return conn
 
     def test_returns_version_on_success(self, tmp_path):
         checker = UpdateChecker(state_path=tmp_path / "v.json", current_version="0")
-        response = self.fake_response({"info": {"version": "1.2.3"}})
-        with patch("contree_mcp.update_check.httpx.get", return_value=response):
+        conn = self.fake_connection({"info": {"version": "1.2.3"}})
+        with patch("contree_mcp.update_check.HTTPSConnection", return_value=conn):
             assert checker.fetch_latest_version() == "1.2.3"
 
     def test_returns_none_on_exception(self, tmp_path):
-        import httpx
-
         checker = UpdateChecker(state_path=tmp_path / "v.json", current_version="0")
-        with patch(
-            "contree_mcp.update_check.httpx.get",
-            side_effect=httpx.RequestError("boom"),
-        ):
+        with patch("contree_mcp.update_check.HTTPSConnection", side_effect=OSError("boom")):
             assert checker.fetch_latest_version() is None
 
     def test_returns_none_on_http_error_status(self, tmp_path):
         checker = UpdateChecker(state_path=tmp_path / "v.json", current_version="0")
-        response = self.fake_response({"detail": "not found"}, status_code=404)
-        with patch("contree_mcp.update_check.httpx.get", return_value=response):
+        conn = self.fake_connection({"detail": "not found"}, status=404)
+        with patch("contree_mcp.update_check.HTTPSConnection", return_value=conn):
             assert checker.fetch_latest_version() is None
 
     def test_returns_none_on_unexpected_payload(self, tmp_path):
         checker = UpdateChecker(state_path=tmp_path / "v.json", current_version="0")
-        response = self.fake_response([])
-        with patch("contree_mcp.update_check.httpx.get", return_value=response):
+        conn = self.fake_connection([])
+        with patch("contree_mcp.update_check.HTTPSConnection", return_value=conn):
             assert checker.fetch_latest_version() is None
 
 

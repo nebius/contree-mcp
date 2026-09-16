@@ -1,6 +1,9 @@
+from contree_client.models import ImageImportRegistry, ImageImportRegistryCredentials
+
 from contree_mcp.auth import RegistryAuth, RegistryToken
-from contree_mcp.backend_types import OperationResponse
 from contree_mcp.context import CLIENT
+from contree_mcp.lineage import record_lineage
+from contree_mcp.tools.get_operation import OperationOutput, operation_output
 
 
 class RegistryAuthenticationError(Exception):
@@ -20,7 +23,7 @@ async def import_image(
     tag: str | None = None,
     wait: bool = True,
     i_accept_that_anonymous_access_might_be_rate_limited: bool = False,
-) -> OperationResponse | dict[str, str]:
+) -> OperationOutput | dict[str, str]:
     """
     Import OCI container image from registry (e.g., Docker Hub). Spawns microVM.
 
@@ -85,15 +88,13 @@ async def import_image(
     if username is None and not i_accept_that_anonymous_access_might_be_rate_limited:
         raise RegistryAuthenticationError(auth.registry)
 
-    operation_id = await client.import_image(
-        registry_url=registry_url,
-        tag=tag,
-        username=username,
-        password=password,
-    )
+    credentials = ImageImportRegistryCredentials(username=username, password=password or "") if username else ...
+    registry = ImageImportRegistry(url=registry_url, credentials=credentials)
+    operation_id = await client.import_image(registry, tag=tag)
 
-    if wait:
-        # Client handles lineage caching automatically via _cache_lineage
-        return await client.wait_for_operation(operation_id)
+    if not wait:
+        return {"operation_id": operation_id}
 
-    return {"operation_id": operation_id}
+    op = await client.wait_operation(operation_id, timeout=None)
+    await record_lineage(client.cache, op)
+    return operation_output(op)

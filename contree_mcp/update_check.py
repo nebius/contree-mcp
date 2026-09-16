@@ -27,12 +27,12 @@ import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import timedelta
+from http.client import HTTPSConnection
 from pathlib import Path
-
-import httpx
+from urllib.parse import urlsplit
 
 from . import config
-from .client import MCP_USER_AGENT, mcp_version
+from .client import MCP_IDENTITY, mcp_version
 
 log = logging.getLogger(__name__)
 
@@ -104,17 +104,25 @@ class UpdateChecker:
         return tuple(parts)
 
     def fetch_latest_version(self) -> str | None:
+        url = urlsplit(self.PYPI_URL)
+        assert url.hostname, f"PYPI_URL has no hostname: {self.PYPI_URL!r}"
         try:
-            response = httpx.get(
-                self.PYPI_URL,
-                headers={
-                    "User-Agent": MCP_USER_AGENT,
-                    "Accept": "application/json",
-                },
-                timeout=self.NETWORK_TIMEOUT,
-            )
-            response.raise_for_status()
-            payload = response.json()
+            conn = HTTPSConnection(url.hostname, url.port or 443, timeout=self.NETWORK_TIMEOUT)
+            try:
+                conn.request(
+                    "GET",
+                    url.path,
+                    headers={
+                        "User-Agent": MCP_IDENTITY,
+                        "Accept": "application/json",
+                    },
+                )
+                response = conn.getresponse()
+                if response.status >= 400:
+                    return None
+                payload = json.loads(response.read())
+            finally:
+                conn.close()
         except Exception:
             return None
         info = payload.get("info") if isinstance(payload, dict) else None

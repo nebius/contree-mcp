@@ -1,71 +1,53 @@
 """Tests for set_tag tool."""
 
-from http import HTTPStatus
-
 import pytest
+from contree_client.exceptions import NotFoundError
 
-from contree_mcp.backend_types import Image
+from contree_mcp.tools.get_image import ImageOutput
 from contree_mcp.tools.set_tag import set_tag
-from tests.conftest import FakeResponse, FakeResponses
+from tests.conftest import make_image
 
 from . import TestCase
 
 
 class TestSetTagHappyPath(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "PATCH /images/{uuid}/tag": FakeResponse(
-                body=Image(uuid="img-1", tag="myapp:v1", created_at="2024-01-01T00:00:00Z")
-            ),
-            "DELETE /images/{uuid}/tag": FakeResponse(
-                body=Image(uuid="img-1", tag=None, created_at="2024-01-01T00:00:00Z")
-            ),
-            "GET /inspect/{uuid}/": FakeResponse(
-                body=Image(uuid="img-1", tag="python:3.11", created_at="2024-01-01T00:00:00Z")
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_set_tag(self) -> None:
+    async def test_set_tag(self, contree_client) -> None:
+        contree_client.mock("update_image_tag", make_image(uuid="img-1", tag="myapp:v1"))
+
         result = await set_tag(image_uuid="img-1", tag="myapp:v1")
+
         assert result.uuid == "img-1"
         assert result.tag == "myapp:v1"
+        assert contree_client.calls_for("update_image_tag")[0].args == ("img-1", "myapp:v1")
 
     @pytest.mark.asyncio
-    async def test_output_type_correct(self) -> None:
+    async def test_output_type_correct(self, contree_client) -> None:
+        contree_client.mock("update_image_tag", make_image(uuid="img-1", tag="myapp:v1"))
+
         result = await set_tag(image_uuid="img-1", tag="myapp:v1")
-        assert isinstance(result, Image)
+
+        assert isinstance(result, ImageOutput)
 
 
 class TestSetTagRemove(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "DELETE /images/{uuid}/tag": FakeResponse(body={}),
-            "GET /inspect/{uuid}/": FakeResponse(
-                body=Image(uuid="img-1", tag=None, created_at="2024-01-01T00:00:00Z")
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_remove_tag(self) -> None:
+    async def test_remove_tag(self, contree_client) -> None:
+        contree_client.mock("delete_image_tag", None)
+        contree_client.mock("inspect_image", make_image(uuid="img-1", tag=None))
+
         result = await set_tag(image_uuid="img-1", tag=None)
+
         assert result.uuid == "img-1"
         assert result.tag is None
+        assert contree_client.calls_for("delete_image_tag")[0].args == ("img-1",)
+        assert contree_client.calls_for("update_image_tag") == []
 
 
 class TestSetTagErrorHandling(TestCase):
-    @pytest.fixture
-    def fake_responses(self) -> FakeResponses:
-        return {
-            "PATCH /images/{uuid}/tag": FakeResponse(
-                http_status=HTTPStatus.NOT_FOUND,
-                body={"error": "Image not found"},
-            ),
-        }
-
     @pytest.mark.asyncio
-    async def test_image_not_found(self) -> None:
-        with pytest.raises(Exception):  # noqa: B017
+    async def test_image_not_found(self, contree_client) -> None:
+        contree_client.mock("update_image_tag", error=NotFoundError(404, "Image not found"))
+
+        with pytest.raises(NotFoundError):
             await set_tag(image_uuid="nonexistent", tag="myapp:v1")

@@ -1,7 +1,18 @@
-from typing import Any
+import base64
 
-from contree_mcp.backend_types import OperationResponse
+from contree_client.models import ClosableStreamRepr, FileSpec, InstanceResourcesLimits
+
+from contree_mcp.client_util import resolved
 from contree_mcp.context import CLIENT, FILES_CACHE
+from contree_mcp.lineage import record_lineage
+from contree_mcp.tools.get_operation import OperationOutput, operation_output
+
+
+def closable_stream(text: str) -> ClosableStreamRepr:
+    data = text.encode("utf-8")
+    if all(32 <= byte < 127 or byte in (9, 10, 13) for byte in data):
+        return ClosableStreamRepr(value=data.decode("ascii"))
+    return ClosableStreamRepr(value=base64.b64encode(data).decode("ascii"), encoding="base64")
 
 
 async def run(
@@ -21,7 +32,7 @@ async def run(
     wait: bool = True,
     truncate_output_at: int = 8000,
     max_layer_bytes: int | None = None,
-) -> OperationResponse | dict[str, str]:
+) -> OperationOutput | dict[str, str]:
     """
     Execute command in isolated container. Spawns microVM.
     Returns string with operation_id when wait=false or detailed result when wait=true.
@@ -65,7 +76,7 @@ async def run(
     image_uuid = await client.resolve_image(image)
 
     # Load files from directory state if provided
-    spawn_files: dict[str, dict[str, Any]] | None = None
+    spawn_files: dict[str, FileSpec] = {}
     if directory_state_id:
         ds = await files_cache.get_directory_state(directory_state_id)
         if ds is None:
@@ -75,38 +86,36 @@ async def run(
         if not ds_files:
             raise ValueError(f"Directory state has no files: {directory_state_id}")
 
-        spawn_files = {}
         for f in ds_files:
-            spawn_files[f.target_path] = {
-                "uuid": f.file_uuid,
-                "mode": oct(f.target_mode),
-            }
+            spawn_files[f.target_path] = FileSpec(uuid=f.file_uuid, mode=oct(f.target_mode))
 
     # Add direct file UUIDs (from upload)
     if files:
-        if spawn_files is None:
-            spawn_files = {}
         for path, uuid in files.items():
-            spawn_files[path] = {"uuid": uuid, "mode": "0o644"}
+            spawn_files[path] = FileSpec(uuid=uuid, mode="0644")
 
-    # Use spawn_instance when files are provided
-    # Note: Client handles lineage caching automatically via _cache_lineage
-    operation_id = await client.spawn_instance(
-        command=command,
-        image=image_uuid,
+    resources_limits = InstanceResourcesLimits(max_layer_bytes=max_layer_bytes) if max_layer_bytes else ...
+
+    response = await client.spawn_instance(
+        command,
+        image_uuid,
         shell=shell,
-        env=env,
+        env=env,  # type: ignore[arg-type]  # None values unset a preserved var; the wire format allows it
         preserve_env=preserve_env,
         cwd=cwd,
         uid=uid,
         gid=gid,
         timeout=timeout,
         disposable=disposable,
-        stdin=stdin,
-        files=spawn_files,
+        stdin=closable_stream(stdin) if stdin else ...,
+        files=spawn_files or ...,
         truncate_output_at=truncate_output_at,
-        max_layer_bytes=max_layer_bytes,
+        resources_limits=resources_limits,
     )
-    if wait:
-        return await client.wait_for_operation(operation_id)
-    return {"operation_id": operation_id}
+    operation_id = resolved(response.uuid, "")
+    if not wait:
+        return {"operation_id": operation_id}
+
+    op = await client.wait_operation(operation_id, timeout=None)
+    await record_lineage(client.cache, op)
+    return operation_output(op)

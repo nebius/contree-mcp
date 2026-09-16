@@ -16,6 +16,7 @@ Follow this sequence for every task:
 2. Inspect first (no VM, free):
      list_files(image="<uuid-or-tag>", path="/etc")
      read_file(image="<uuid-or-tag>", path="/etc/os-release")
+     grep(image="<uuid-or-tag>", pattern="PermitRootLogin", path="/etc")
 
 3. Stage local files when needed:
      rsync(source="/path/to/project", destination="/app") -> directory_state_id
@@ -76,8 +77,8 @@ Step 4. Use it:
   `disposable=false` the moment you want to keep the result.
   (Heads-up for CLI users: this is the opposite of `contree run`'s
   default.)
-- Prefer `list_files` / `read_file` over `run("ls ...")` /
-  `run("cat ...")` — they're free and avoid spawning a microVM.
+- Prefer `list_files` / `read_file` / `grep` over `run("ls ...")` /
+  `run("cat ...")` / `run("grep ...")` — they're free and avoid spawning a microVM.
 - Inject files explicitly. Local files are NOT visible inside the
   sandbox unless attached via `rsync` (directory) or `upload`
   (single file).

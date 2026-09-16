@@ -1,17 +1,18 @@
 from pydantic import BaseModel, Field
 
-from contree_mcp.backend_types import Image
 from contree_mcp.context import CLIENT
+
+from .get_image import ImageOutput, image_output
 
 
 class ListImagesOutput(BaseModel):
-    images: list[Image] = Field(description="List of images")
+    images: list[ImageOutput] = Field(description="List of images")
 
 
 async def list_images(
     limit: int = 100,
     offset: int = 0,
-    tagged: bool | None = None,
+    tagged: bool = False,
     tag_prefix: str | None = None,
     since: str | None = None,
     until: str | None = None,
@@ -39,12 +40,15 @@ async def list_images(
     """
 
     client = CLIENT.get()
-    images = await client.list_images(
+    # Strip trailing separators - backend validates tag format strictly
+    tag = tag_prefix.rstrip(":/.") if tag_prefix else None
+    response = await client.list_images(
         limit=limit,
         offset=offset,
         tagged=tagged,
-        tag_prefix=tag_prefix,
+        tag=tag,
         since=since,
         until=until,
     )
-    return ListImagesOutput(images=[Image(uuid=img.uuid, tag=img.tag, created_at=img.created_at) for img in images])
+    images = response.images if isinstance(response.images, list) else []
+    return ListImagesOutput(images=[image_output(img) for img in images])

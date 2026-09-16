@@ -1,41 +1,41 @@
-"""Test fixtures for contree-mcp tools."""
+"""Test fixtures for contree-mcp tools.
 
-import asyncio
-import json
-import re
-import socket
+Backend calls are faked with contree_client's own in-memory test
+double (``contree_client.testing``) rather than a hand-rolled fake HTTP
+server: call ``contree_client.mock("operation_name", result)`` (or
+``error=...``) before invoking a tool, then assert on the tool's
+return value. See ``contree_client/testing.py`` for the exact
+semantics (repeated ``mock()`` calls queue sequential results; the
+last one is sticky; ``calls_for("operation_name")`` lists recorded
+calls for assertions on what was actually requested).
+"""
+
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
-from http import HTTPStatus
 from typing import Any
 
 import pytest
-import uvicorn
-from pydantic import BaseModel
-from starlette.applications import Starlette
-from starlette.requests import Request
-from starlette.responses import Response, StreamingResponse
-from starlette.routing import Route
-
-from contree_mcp.backend_types import (
-    ConsumedResources,
+from contree_client import testing as client_testing
+from contree_client.models import (
     Image,
-    InstanceMetadata,
+    ImageImportMetadata,
     InstanceResult,
-    OperationKind,
+    InstanceResultResources,
+    InstanceResultState,
+    OperationInstanceMetadata,
     OperationResponse,
     OperationResult,
     OperationStatus,
-    ProcessExitState,
-    Stream,
+    StreamRepr,
 )
+
 from contree_mcp.cache import Cache
-from contree_mcp.client import ContreeClient
 from contree_mcp.context import CLIENT, FILES_CACHE
 from contree_mcp.file_cache import DirectoryState, DirectoryStateFile, FileCache
 
 # =============================================================================
-# Default test data factories
+# Default test data factories — build contree_client dataclasses
+# directly (what a mocked API method actually returns), not wire-format
+# JSON. No network is involved, so there's no JSON round-trip to model.
 # =============================================================================
 
 
@@ -45,7 +45,7 @@ def make_image(
     created_at: str = "2024-01-01T00:00:00Z",
 ) -> Image:
     """Create a test Image."""
-    return Image(uuid=uuid, tag=tag, created_at=created_at)
+    return Image(uuid=uuid, tag=tag, created_at=created_at, operation_uuid=None)
 
 
 def make_instance_result(
@@ -54,12 +54,12 @@ def make_instance_result(
     stderr: str = "",
     elapsed_time: float = 0.5,
 ) -> InstanceResult:
-    """Create a test InstanceResult."""
+    """Create a test InstanceResult (nested under operation metadata)."""
     return InstanceResult(
-        state=ProcessExitState(exit_code=exit_code, pid=1, timed_out=False),
-        stdout=Stream(value=stdout, encoding="ascii"),
-        stderr=Stream(value=stderr, encoding="ascii"),
-        resources=ConsumedResources(elapsed_time=elapsed_time),
+        state=InstanceResultState(exit_code=exit_code, pid=1, timed_out=False),
+        stdout=StreamRepr(value=stdout, encoding="ascii"),
+        stderr=StreamRepr(value=stderr, encoding="ascii"),
+        resources=InstanceResultResources(elapsed_time=elapsed_time),
     )
 
 
@@ -69,9 +69,9 @@ def make_instance_metadata(
     exit_code: int = 0,
     stdout: str = "hello",
     stderr: str = "",
-) -> InstanceMetadata:
-    """Create a test InstanceMetadata with result."""
-    return InstanceMetadata(
+) -> OperationInstanceMetadata:
+    """Create test instance operation metadata with a result."""
+    return OperationInstanceMetadata(
         command=command,
         image=image,
         result=make_instance_result(exit_code=exit_code, stdout=stdout, stderr=stderr),
@@ -80,59 +80,31 @@ def make_instance_metadata(
 
 def make_operation_response(
     uuid: str = "op-1",
-    status: OperationStatus = OperationStatus.SUCCESS,
-    kind: OperationKind = OperationKind.INSTANCE,
+    kind: str = "instance",
+    status: str = "SUCCESS",
     error: str | None = None,
-    metadata: InstanceMetadata | None = None,
-    result_image: str = "img-result",
+    created_at: str = "2024-01-01T00:00:00Z",
+    metadata: OperationInstanceMetadata | ImageImportMetadata | None = None,
+    result_image: str | None = None,
     result_tag: str | None = None,
 ) -> OperationResponse:
-    """Create a test OperationResponse."""
+    """Create a test OperationResponse, as returned by ``get_operation_status``
+    and (indirectly) by ``wait_operation``.
+
+    Uses the real ``OperationStatus`` enum (constructing the dataclass
+    directly bypasses ``from_dict``/``parse_fields``, so a raw string
+    status would break ``OperationStatus.is_terminal()`` calls made by
+    ``operation_terminal()`` deep in ``follow_operation_events``).
+    """
+    result = OperationResult(image=result_image, tag=result_tag) if result_image is not None or result_tag else None
     return OperationResponse(
         uuid=uuid,
-        status=status,
-        kind=kind,
+        kind=kind,  # type: ignore[arg-type]
+        status=OperationStatus(status),
         error=error,
-        metadata=metadata or make_instance_metadata(),
-        result=OperationResult(image=result_image, tag=result_tag),
-    )
-
-
-def make_sse_event(
-    event_id: int,
-    event_type: str,
-    data: dict | None = None,
-    spid: int | None = None,
-) -> dict:
-    """Create one OperationEvent dict for SSE fake streams."""
-    event: dict = {
-        "id": event_id,
-        "ts": "2026-01-01T00:00:00.000000000Z",
-        "type": event_type,
-        "data": data or {},
-    }
-    if spid is not None:
-        event["spid"] = spid
-    return event
-
-
-def make_completion_event(
-    event_id: int = 10,
-    status: str = "SUCCESS",
-    result_image: str | None = "img-result",
-    error: str | None = None,
-) -> dict:
-    """Create the terminal `completion` OperationEvent."""
-    return make_sse_event(
-        event_id,
-        "completion",
-        {
-            "status": status,
-            "result_image_uuid": result_image,
-            "error": error,
-            "duration_ms": 100,
-            "image_size_bytes": 0,
-        },
+        created_at=created_at,
+        metadata=metadata,
+        result=result,
     )
 
 
@@ -155,266 +127,8 @@ def make_directory_state_file(
 
 
 # =============================================================================
-# FakeResponse - HTTP-like response configuration
+# Fixtures
 # =============================================================================
-
-
-@dataclass
-class FakeResponse:
-    """HTTP-like response for fake server.
-
-    Attributes:
-        http_status: HTTP status code
-        body: Response body (BaseModel, list, dict, str, or None)
-        headers: Response headers as tuple of (name, value) pairs
-        sse_events: when set, respond with ``text/event-stream`` and write
-            each dict as one SSE frame (``id:`` / ``event:`` / ``data:``),
-            then close the stream. A dict with ``{"type": "sse_error", ...}``
-            is written as a plain-text ``event: sse_error`` frame.
-    """
-
-    http_status: HTTPStatus = HTTPStatus.OK
-    body: BaseModel | list | dict | str | None = None
-    headers: tuple[tuple[str, str], ...] = ()
-    sse_events: list[dict] | None = None
-
-
-class FakeResponseSequence:
-    """Return a different FakeResponse per request; the last one repeats.
-
-    Lets tests script multi-connection behaviors like "425 first, then a
-    working SSE stream" or "disconnect mid-stream, deliver the rest on
-    reconnect".
-    """
-
-    def __init__(self, *responses: FakeResponse):
-        assert responses
-        self._responses = list(responses)
-        self._index = 0
-
-    def next(self) -> FakeResponse:
-        response = self._responses[min(self._index, len(self._responses) - 1)]
-        self._index += 1
-        return response
-
-
-# Type alias for fake responses dictionary
-FakeResponses = dict[str, "FakeResponse | FakeResponseSequence"]
-
-
-def sse_frame(event: dict) -> bytes:
-    """Serialize one event dict to an SSE wire frame."""
-    if event.get("type") == "sse_error":
-        return f"event: sse_error\ndata: {event.get('message', 'stream error')}\n\n".encode()
-    lines = []
-    if "id" in event:
-        lines.append(f"id: {event['id']}")
-    if "type" in event:
-        lines.append(f"event: {event['type']}")
-    lines.append(f"data: {json.dumps(event)}")
-    return ("\n".join(lines) + "\n\n").encode()
-
-
-# =============================================================================
-# RouteMatcher - Match URL patterns with path parameters
-# =============================================================================
-
-
-class RouteMatcher:
-    """Match request URIs against fake_responses patterns.
-
-    Converts patterns like "GET /images/{uuid}" to regex that matches
-    "GET /images/abc-123".
-    """
-
-    # Regex to find {param} placeholders
-    _PARAM_PATTERN = re.compile(r"\{([^}]+)\}")
-
-    def __init__(self, responses: FakeResponses):
-        self._responses = responses
-        self._compiled: list[tuple[re.Pattern[str], str]] = []
-        self._compile_patterns()
-
-    def _compile_patterns(self) -> None:
-        """Compile all response patterns to regex."""
-        for pattern in self._responses:
-            # Anchor the pattern
-            regex = re.compile(f"^{re.escape(pattern.split()[0])} {self._path_to_regex(pattern)}$")
-            self._compiled.append((regex, pattern))
-
-    def _path_to_regex(self, pattern: str) -> str:
-        """Convert path pattern to regex."""
-        # Split "GET /images/{uuid}" -> "/images/{uuid}"
-        parts = pattern.split(" ", 1)
-        path = parts[1] if len(parts) > 1 else parts[0]
-        # Replace {param} with ([^/]+) and escape other regex chars
-        result = ""
-        last_end = 0
-        for match in self._PARAM_PATTERN.finditer(path):
-            result += re.escape(path[last_end : match.start()])
-            result += "([^/]+)"
-            last_end = match.end()
-        result += re.escape(path[last_end:])
-        return result
-
-    def match(self, method: str, path: str) -> "FakeResponse | FakeResponseSequence | None":
-        """Match a request to a fake response.
-
-        Args:
-            method: HTTP method (GET, POST, etc.)
-            path: Request path (e.g., "/images/abc-123")
-
-        Returns:
-            Matching FakeResponse or None if no match found.
-        """
-        uri = f"{method} {path}"
-
-        # Try exact match first
-        if uri in self._responses:
-            return self._responses[uri]
-
-        # Try pattern matching
-        for regex, pattern in self._compiled:
-            if regex.match(uri):
-                return self._responses[pattern]
-
-        return None
-
-
-# =============================================================================
-# Fixtures - Real HTTP fake server
-# =============================================================================
-
-
-@pytest.fixture
-def fake_server_socket() -> socket.socket:
-    """Create a bound socket for the fake server."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(("127.0.0.1", 0))
-    return sock
-
-
-@pytest.fixture
-def fake_server_port(fake_server_socket: socket.socket) -> int:
-    """Port the fake server is bound to."""
-    _, port = fake_server_socket.getsockname()
-    return port
-
-
-@pytest.fixture
-def fake_server_url(fake_server_port: int) -> str:
-    """URL for the fake server."""
-    return f"http://127.0.0.1:{fake_server_port}"
-
-
-def _convert_pydantic(obj: Any) -> Any:
-    """Recursively convert pydantic models to dicts."""
-    if isinstance(obj, BaseModel):
-        return obj.model_dump()
-    if isinstance(obj, dict):
-        return {k: _convert_pydantic(v) for k, v in obj.items()}
-    if isinstance(obj, list):
-        return [_convert_pydantic(item) for item in obj]
-    return obj
-
-
-def _serialize_body(body: Any) -> str:
-    """Serialize response body to JSON string."""
-    if body is None:
-        return ""
-    if isinstance(body, BaseModel):
-        return body.model_dump_json()
-    if isinstance(body, (list, dict)):
-        return json.dumps(_convert_pydantic(body))
-    if isinstance(body, bool):
-        return json.dumps(body)
-    return str(body)
-
-
-@pytest.fixture
-async def http_fake_server(
-    fake_responses: FakeResponses,
-    fake_server_socket: socket.socket,
-) -> AsyncIterator[None]:
-    """Real HTTP server returning configured fake responses.
-
-    Uses pre-bound socket so server is ready immediately after task starts.
-    """
-    matcher = RouteMatcher(fake_responses)
-
-    async def handle_request(request: Request) -> Response:
-        """Handle incoming requests and return configured fake responses."""
-        method = request.method
-        # Strip /v1 prefix since ContreeClient adds it
-        path = request.url.path
-        if path.startswith("/v1"):
-            path = path[3:]  # Remove /v1 prefix
-
-        fake_response = matcher.match(method, path)
-
-        if fake_response is None:
-            return Response(
-                content=json.dumps({"error": f"No fake response for {method} {path}"}),
-                status_code=404,
-                media_type="application/json",
-            )
-
-        if isinstance(fake_response, FakeResponseSequence):
-            fake_response = fake_response.next()
-
-        if fake_response.sse_events is not None:
-            events = list(fake_response.sse_events)
-
-            async def event_stream() -> AsyncIterator[bytes]:
-                yield b": keepalive\n\n"
-                for event in events:
-                    yield sse_frame(event)
-
-            return StreamingResponse(
-                event_stream(),
-                status_code=fake_response.http_status.value,
-                headers=dict(fake_response.headers),
-                media_type="text/event-stream",
-            )
-
-        content = _serialize_body(fake_response.body)
-        headers = dict(fake_response.headers)
-
-        # Set content type if not specified
-        if "content-type" not in {k.lower() for k in headers}:
-            if fake_response.body is None:
-                media_type = "application/json"
-            elif isinstance(fake_response.body, str) and not fake_response.body.startswith("{"):
-                media_type = "text/plain"
-            else:
-                media_type = "application/json"
-            headers["Content-Type"] = media_type
-
-        return Response(
-            content=content,
-            status_code=fake_response.http_status.value,
-            headers=headers,
-        )
-
-    app = Starlette(
-        routes=[
-            Route(
-                "/{path:path}",
-                endpoint=handle_request,
-                methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"],
-            ),
-        ],
-    )
-
-    config = uvicorn.Config(app, log_level="error")
-    server = uvicorn.Server(config)
-    server_task = asyncio.create_task(server.serve(sockets=[fake_server_socket]))
-
-    yield
-
-    server.should_exit = True
-    await server_task
 
 
 @pytest.fixture
@@ -431,38 +145,32 @@ async def general_cache(tmp_path: Any) -> AsyncIterator[Cache]:
         yield cache
 
 
-@pytest.fixture
-async def contree_client(
-    http_fake_server: None,
-    fake_server_url: str,
-    files_cache: FileCache,
-    general_cache: Cache,
-) -> AsyncIterator[ContreeClient]:
-    """Real ContreeClient pointing to the fake HTTP server."""
-    async with ContreeClient(
-        base_url=fake_server_url,
-        token="test-token",
-        cache=general_cache,
-    ) as client:
-        # Set context variables
-        CLIENT.set(client)
-        FILES_CACHE.set(files_cache)
+class FakeContreeClient(client_testing.ContreeAsyncClient):
+    """contree_client's in-memory test double, plus the `.cache` our own
+    :class:`contree_mcp.client.ContreeClient` carries (registry tokens,
+    image lineage) — mirrors the production subclass without any real
+    transport."""
 
-        yield client
+    def __init__(self, cache: Cache, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.cache = cache
+
+
+@pytest.fixture
+def contree_client(files_cache: FileCache, general_cache: Cache) -> FakeContreeClient:
+    """Fake ContreeClient with CLIENT/FILES_CACHE context vars set.
+
+    Mock whatever client methods a test needs via
+    ``contree_client.mock("operation_name", result)`` before calling
+    the tool under test.
+    """
+    client = FakeContreeClient(cache=general_cache)
+    CLIENT.set(client)
+    FILES_CACHE.set(files_cache)
+    return client
 
 
 @pytest.fixture
 def sample_image() -> Image:
     """Sample image for tests."""
     return make_image(uuid="img-test-123", tag="test:latest")
-
-
-@pytest.fixture
-def fake_responses() -> FakeResponses:
-    """Default empty fake responses for tests that don't need HTTP.
-
-    Tests that use cache-based resources (image_lineage, instance_operation,
-    import_operation) still need contree_client, which depends on http_fake_server,
-    which depends on this fixture. This provides an empty default.
-    """
-    return {}

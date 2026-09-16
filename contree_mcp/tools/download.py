@@ -114,8 +114,7 @@ async def download(
 
     dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    async with client.stream_file(image_uuid, path) as chunks:
-        file_size = await async_file_writer(dest_path, chunks)
+    file_size = await async_file_writer(dest_path, client.inspect_image_download_stream(image_uuid, path))
 
     if executable and platform.system() != "Windows":
         dest_path.chmod(0o755)

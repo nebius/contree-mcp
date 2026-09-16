@@ -94,6 +94,7 @@ Parallel Services:
 | `download` | Download file to local |
 | `list_files` | List files in container image (no VM) |
 | `read_file` | Read file from container image (no VM) |
+| `grep` | Search file contents via ripgrep (no VM) |
 | `list_operations` | List operations |
 | `get_operation` | Get operation status |
 | `wait_operations` | Wait for multiple operations |

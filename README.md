@@ -189,6 +189,7 @@ profile in `config.ini`**.
 |------|-------------|
 | `contree_list_files` | List files and directories in an image (no VM needed) |
 | `contree_read_file` | Read a file from an image (no VM needed) |
+| `contree_grep` | Search file contents via ripgrep (no VM needed) |
 
 ### Operations
 

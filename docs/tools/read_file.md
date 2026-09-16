@@ -98,5 +98,6 @@ Response:
 ## See Also
 
 - {doc}`list_files` - List directory contents without VM
+- {doc}`grep` - Search file contents without VM
 - {doc}`download` - Download file to local filesystem
 - [Resources](../resources.md) - `contree://image/{image}/read/{path}` resource alternative

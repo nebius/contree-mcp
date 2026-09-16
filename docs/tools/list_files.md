@@ -99,5 +99,6 @@ Response:
 ## See Also
 
 - {doc}`read_file` - Read file contents without VM
+- {doc}`grep` - Search file contents without VM
 - {doc}`run` - Execute commands (spawns VM)
 - [Resources](../resources.md) - `contree://image/{image}/ls/{path}` resource alternative

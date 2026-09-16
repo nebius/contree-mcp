@@ -24,7 +24,7 @@ async def read_file(image: str, path: str) -> str:
     client = CLIENT.get()
     image_uuid = await client.resolve_image(image)
     file_path = "/" + unquote(path).lstrip("/")
-    content = await client.read_file(image_uuid, file_path)
+    content = await client.inspect_image_download(image_uuid, file_path)
 
     try:
         return content.decode("utf-8")
